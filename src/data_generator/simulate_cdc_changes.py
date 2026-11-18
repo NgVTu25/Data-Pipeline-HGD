@@ -8,7 +8,12 @@ Dùng để kiểm thử luồng CDC -> Near Real-time C360 -> Đối soát, BI 
 4. UPDATE đổi mã công dân (đổi MA_CD sang mã mới, lưu mã cũ vào MA_CD_OLD) -> C360 tạo mã mới & xóa mã cũ.
 5. DELETE xóa dòng hộ mới nhất của người có nhiều hộ (C360 tự lùi về hộ cũ) hoặc xóa hết các dòng của 1 MA_CD.
 """
+import argparse
 from typing import List, Tuple
+
+import oracledb
+
+from src.config import SOURCE_DB
 
 
 def build_cdc_test_sql_statements() -> List[Tuple[str, str]]:
@@ -94,8 +99,31 @@ def build_cdc_test_sql_statements() -> List[Tuple[str, str]]:
     ]
 
 
-if __name__ == "__main__":
+def run_cdc_simulation() -> None:
+    """Thực thi các kịch bản biến động CDC trực tiếp lên bảng nguồn Oracle."""
     scenarios = build_cdc_test_sql_statements()
-    print(f"[CDC Delta Simulator] Prepared {len(scenarios)} CDC test scenarios:")
-    for name, _ in scenarios:
-        print(f"  - {name}")
+    with oracledb.connect(
+        user=SOURCE_DB.user,
+        password=SOURCE_DB.password,
+        dsn=SOURCE_DB.dsn,
+    ) as conn:
+        with conn.cursor() as cur:
+            for name, sql in scenarios:
+                cur.execute(sql.strip())
+                print(f"[CDC Delta Simulator] Executed {name}: rowcount={cur.rowcount}")
+        conn.commit()
+    print("[CDC Delta Simulator] Committed all CDC test scenarios.")
+
+
+if __name__ == "__main__":
+    parser = argparse.ArgumentParser(description="Execute CDC test scenarios against Oracle VSS schema.")
+    parser.add_argument("--dry-run", action="store_true", help="Print scenarios without executing on Oracle")
+    args = parser.parse_args()
+
+    if args.dry_run:
+        scenarios = build_cdc_test_sql_statements()
+        print(f"[CDC Delta Simulator Dry-Run] Prepared {len(scenarios)} CDC test scenarios:")
+        for name, _ in scenarios:
+            print(f"  - {name}")
+    else:
+        run_cdc_simulation()
