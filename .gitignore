@@ -1,0 +1,36 @@
+# Byte-compiled / optimized / DLL files
+__pycache__/
+*.py[cod]
+*$py.class
+
+# Virtual environments
+.venv/
+venv/
+env/
+
+# Environment variables & secrets (NEVER commit real credentials)
+.env
+*.env.local
+
+# Data, logs, and temporary outputs (Requirement 5.2: No heavy data or junk files in Git)
+data/
+logs/
+*.log
+*.csv
+*.parquet
+*.dmp
+*.bak
+
+# Spark / Java / Airflow artifacts
+spark-warehouse/
+metastore_db/
+derby.log
+airflow/logs/
+airflow/airflow.db
+airflow/webserver_config.py
+
+# IDE & OS files
+.vscode/
+.idea/
+.DS_Store
+Thumbs.db
