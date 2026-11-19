@@ -1,0 +1,21 @@
+﻿{
+  "name": "vss-hgd-oracle-source-connector",
+  "config": {
+    "connector.class": "io.debezium.connector.oracle.OracleConnector",
+    "tasks.max": "1",
+    "database.hostname": "hgd-oracle",
+    "database.port": "1521",
+    "database.user": "c##dbzuser",
+    "database.password": "dbzpassword",
+    "database.dbname": "FREE",
+    "database.pdb.name": "FREEPDB1",
+    "topic.prefix": "vss_cdc",
+    "table.include.list": "VSS.VSS_HO_GD_NHANKHAU,VSS.VSS_DM_DANTOC,VSS.VSS_DM_QUOC_TICH,VSS.VSS_DM_DBHC",
+    "message.key.columns": "VSS.VSS_HO_GD_NHANKHAU:MA_CD,MA_HO_GD",
+    "snapshot.mode": "no_data",
+    "decimal.handling.mode": "precise",
+    "tombstones.on.delete": "true",
+    "schema.history.internal.kafka.bootstrap.servers": "kafka:29092",
+    "schema.history.internal.kafka.topic": "schema-changes.vss"
+  }
+}

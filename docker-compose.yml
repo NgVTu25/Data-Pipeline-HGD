@@ -37,7 +37,7 @@ services:
       KAFKA_OFFSETS_TOPIC_REPLICATION_FACTOR: 1
 
   debezium-connect:
-    image: quay.io/debezium/connect:2.5
+    image: quay.io/debezium/connect:latest
     container_name: hgd-debezium-connect
     depends_on:
       - kafka
@@ -49,6 +49,9 @@ services:
       CONFIG_STORAGE_TOPIC: my_connect_configs
       OFFSET_STORAGE_TOPIC: my_connect_offsets
       STATUS_STORAGE_TOPIC: my_connect_statuses
+    volumes:
+      - ./drivers/ojdbc11.jar:/kafka/connect/debezium-connector-oracle/ojdbc11.jar:ro
+      - ./drivers/ojdbc11.jar:/kafka/connect/debezium-connector-jdbc/ojdbc11.jar:ro
 
 volumes:
   oracle_data:

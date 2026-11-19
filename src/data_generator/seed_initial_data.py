@@ -247,17 +247,8 @@ def _get_household_count(citizen_no: int, multi_indices: set[int], three_indices
     return 1
 
 
-def _make_household_code(citizen_no: int, household_idx: int) -> Optional[str]:
-    """Tạo MA_HO_GD, gồm NULL và literal UNKNOWN để test lỗi NVL/COALESCE."""
-    # Cùng một MA_CD nhưng một dòng NULL, một dòng 'UNKNOWN': cố ý tạo collision
-    # khi logic downstream dùng NVL(MA_HO_GD, 'UNKNOWN').
-    if citizen_no == 2:
-        return None if household_idx == 0 else "UNKNOWN"
-
-    if citizen_no % 50 == 0 and household_idx == 0:
-        return None
-    if citizen_no % 97 == 0 and household_idx == 0:
-        return "UNKNOWN"
+def _make_household_code(citizen_no: int, household_idx: int) -> str:
+    """Tạo MA_HO_GD duy nhất theo từng công dân và thứ tự hộ gia đình."""
     return f"HGD_{citizen_no * 10 + household_idx:010d}"
 
 

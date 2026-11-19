@@ -1,0 +1,19 @@
+﻿{
+  "name": "c360-mirror-jdbc-sink-connector",
+  "config": {
+    "connector.class": "io.debezium.connector.jdbc.JdbcSinkConnector",
+    "tasks.max": "1",
+    "topics": "vss_cdc.VSS.VSS_HO_GD_NHANKHAU",
+    "connection.url": "jdbc:oracle:thin:@//hgd-oracle:1521/FREEPDB1",
+    "connection.username": "C360",
+    "connection.password": "c360_pwd",
+    "table.name.format": "C360.MIRROR_VSS_HO_GD_NHANKHAU",
+    "insert.mode": "upsert",
+    "delete.enabled": "true",
+    "primary.key.mode": "record_key",
+    "primary.key.fields": "MA_CD,MA_HO_GD",
+    "schema.evolution": "none",
+    "quote.identifiers": "false",
+    "batch.size": "3000"
+  }
+}
