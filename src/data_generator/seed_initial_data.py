@@ -9,12 +9,6 @@ Nguyên tắc thiết kế:
 2. Phần dữ liệu còn lại được sinh ngẫu nhiên có trọng số để mô phỏng phân bố thực tế.
 3. Có seed để tái lập cùng một bộ dữ liệu khi debug.
 4. Dry-run in thống kê chất lượng dữ liệu mà không kết nối Oracle.
-
-Lưu ý:
-- Các mã/địa bàn trong script là dữ liệu kiểm thử mô phỏng theo kịch bản thiết kế,
-  không thay thế danh mục hành chính chính thức.
-- Script giữ nguyên tên cột và kiểu giá trị theo phiên bản code người dùng cung cấp.
-  Cần đối chiếu DDL thực tế trước khi chạy --truncate hoặc nạp dữ liệu.
 """
 
 from __future__ import annotations
