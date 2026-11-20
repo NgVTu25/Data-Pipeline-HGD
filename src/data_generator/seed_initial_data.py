@@ -18,7 +18,7 @@ import json
 import random
 from collections import Counter
 from datetime import datetime, timedelta
-from typing import Any, Dict, Iterator, List, Optional, Sequence, Tuple
+from typing import Any, Dict, Iterable, Iterator, List, Optional, Sequence, Tuple
 
 try:
     import oracledb
@@ -319,20 +319,15 @@ def _make_person_name(citizen_no: int) -> Tuple[str, str]:
     return f"Nguyễn Văn Công Dân {citizen_no}", f"NGUYEN VAN CONG DAN {citizen_no}"
 
 
-def generate_citizen_records(
+def iter_citizen_records(
     num_citizens: int = SEED_NUM_CITIZENS,
     seed: int = DEFAULT_SEED,
-) -> List[Dict[str, Any]]:
-    """Sinh dữ liệu công dân; num_citizens là số MA_CD logic, không phải số dòng.
-
-    Tổng số dòng có thể lớn hơn num_citizens do một công dân có thể xuất hiện ở
-    nhiều hộ gia đình.
-    """
+) -> Iterator[Dict[str, Any]]:
+    """Sinh dữ liệu công dân theo dạng streaming iterator (tiết kiệm RAM khi seed hàng triệu dòng)."""
     if num_citizens <= 0:
         raise ValueError("num_citizens phải lớn hơn 0.")
 
     rng = random.Random(seed)
-    records: List[Dict[str, Any]] = []
     multi_household_indices, three_household_indices = _build_household_plan(num_citizens, rng)
 
     for citizen_no in range(1, num_citizens + 1):
@@ -456,9 +451,15 @@ def generate_citizen_records(
                 "CREATED_DATE": created_dt,
                 "MODIFY_DATE": mod_date,
             }
-            records.append(record)
+            yield record
 
-    return records
+
+def generate_citizen_records(
+    num_citizens: int = SEED_NUM_CITIZENS,
+    seed: int = DEFAULT_SEED,
+) -> List[Dict[str, Any]]:
+    """Sinh dữ liệu công dân dạng List (tương thích ngược cho dry-run và unit test)."""
+    return list(iter_citizen_records(num_citizens=num_citizens, seed=seed))
 
 
 # -----------------------------------------------------------------------------
@@ -466,13 +467,19 @@ def generate_citizen_records(
 # -----------------------------------------------------------------------------
 
 def chunked_records(
-    records: List[Dict[str, Any]],
+    records: Iterable[Dict[str, Any]],
     batch_size: int = SEED_BATCH_SIZE,
 ) -> Iterator[List[Dict[str, Any]]]:
     if batch_size <= 0:
         raise ValueError("batch_size phải lớn hơn 0.")
-    for idx in range(0, len(records), batch_size):
-        yield records[idx:idx + batch_size]
+    batch: List[Dict[str, Any]] = []
+    for row in records:
+        batch.append(row)
+        if len(batch) >= batch_size:
+            yield batch
+            batch = []
+    if batch:
+        yield batch
 
 
 def summarize_records(records: List[Dict[str, Any]], num_citizens: int) -> Dict[str, Any]:
@@ -682,7 +689,7 @@ def seed_to_oracle(
 
     schema = SOURCE_DB.schema
     categories = get_seed_categories()
-    citizen_rows = generate_citizen_records(num_citizens=num_citizens, seed=seed)
+    citizen_stream = iter_citizen_records(num_citizens=num_citizens, seed=seed)
     sql = _build_sql(schema)
 
     print(f"[Seed] Connecting Oracle schema={schema}, DSN={SOURCE_DB.dsn}")
@@ -717,19 +724,19 @@ def seed_to_oracle(
 
                 inserted = 0
                 _set_citizen_bind_sizes(cur)
-                for batch_no, batch in enumerate(chunked_records(citizen_rows, batch_size), start=1):
+                for batch_no, batch in enumerate(chunked_records(citizen_stream, batch_size), start=1):
                     cur.executemany(sql["insert_citizen"], batch)
                     conn.commit()
                     inserted += len(batch)
-                    print(
-                        f"[Seed] Batch {batch_no}: inserted {inserted}/{len(citizen_rows)} "
-                        f"rows into {schema}.VSS_HO_GD_NHANKHAU"
-                    )
+                    if batch_no <= 5 or batch_no % 10 == 0 or len(batch) < batch_size:
+                        print(
+                            f"[Seed] Batch {batch_no}: inserted {inserted} rows into {schema}.VSS_HO_GD_NHANKHAU"
+                        )
         except Exception:
             conn.rollback()
             raise
 
-    print(f"[Seed] Done. Total {len(citizen_rows)} rows for {num_citizens} logical citizens.")
+    print(f"[Seed] Done. Total {inserted} rows for {num_citizens} logical citizens.")
 
 
 # -----------------------------------------------------------------------------
