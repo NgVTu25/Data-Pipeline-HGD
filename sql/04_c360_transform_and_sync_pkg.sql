@@ -1,10 +1,31 @@
 -- ==============================================================================
 -- 04_C360_TRANSFORM_AND_SYNC_PKG.SQL
+-- 0. Hàm chuẩn hóa Tiếng Việt không dấu IN HOA: C360.FN_TO_UNSIGNED_UPPER
 -- 1. View chuẩn hóa dùng chung: C360.VW_C360_TRANSFORM_SOURCE
---    (đã sửa điều kiện lọc Blacklist NOT IN ('GT','GM','GG','GK') và NOT IN (1,3,4))
 -- 2. Package đồng bộ: C360.PKG_C360_SYNC
---    (đã sửa REGEXP_SUBSTR(..., '^\d+') cho mã 01TTT và gán biến v_err_msg := SUBSTR(SQLERRM, 1, 2000))
+--    - PRC_REFRESH_DBHC_MAPS
+--    - PRC_RUN_FULL_LOAD (Staging -> Validate -> Publish, an toàn khi lỗi)
+--    - PRC_RUN_NEAR_REALTIME_BATCH (Queue state/lease + FOR UPDATE SKIP LOCKED + Change Log)
 -- ==============================================================================
+
+-- ------------------------------------------------------------------------------
+-- 0. HÀM CHUẨN HÓA HỌ TÊN KHÔNG DẤU IN HOA
+-- ------------------------------------------------------------------------------
+CREATE OR REPLACE FUNCTION C360.FN_TO_UNSIGNED_UPPER(p_str IN VARCHAR2)
+RETURN VARCHAR2 DETERMINISTIC IS
+    v_clean VARCHAR2(4000);
+BEGIN
+    IF p_str IS NULL THEN
+        RETURN NULL;
+    END IF;
+    v_clean := UPPER(REGEXP_REPLACE(TRIM(p_str), '\s+', ' '));
+    RETURN TRANSLATE(
+        v_clean,
+        'ÁÀẢÃẠĂẮẰẲẴẶÂẤẦẨẪẬĐÉÈẺẼẸÊẾỀỂỄỆÍÌỈĨỊÓÒỎÕỌÔỐỒỔỖỘƠỚỜỞỠỢÚÙỦŨỤƯỨỪỬỮỰÝỲỶỸỴ',
+        'AAAAAAAAAAAAAAAAADEEEEEEEEEEEIIIIIOOOOOOOOOOOOOOOOOUUUUUUUUUUUYYYYY'
+    );
+END FN_TO_UNSIGNED_UPPER;
+/
 
 -- ------------------------------------------------------------------------------
 -- 1. VIEW LOGIC CHUẨN HÓA DÙNG CHUNG (C360.VW_C360_TRANSFORM_SOURCE)
@@ -34,19 +55,21 @@ SELECT
     d.ISCHU_HO AS IS_CHU_HO,
     d.QH_CHU_HO,
     d.TEN_QH_CHUHO AS TEN_QH_CHU_HO,
-    -- Làm sạch khoảng trắng thừa ở Họ tên
+    -- Làm sạch khoảng trắng thừa ở Họ tên & loại dấu tiếng Việt đồng nhất với API
     REGEXP_REPLACE(TRIM(d.HO_TEN), '\s+', ' ') AS HO_TEN,
-    UPPER(REGEXP_REPLACE(TRIM(NVL(d.HO_TEN_UNSIGNED, d.HO_TEN)), '\s+', ' ')) AS HO_TEN_KHONG_DAU,
+    C360.FN_TO_UNSIGNED_UPPER(NVL(d.HO_TEN_UNSIGNED, d.HO_TEN)) AS HO_TEN_KHONG_DAU,
     d.GIOI_TINH,
-    -- Chuẩn hóa ngày sinh (YYYYMMDD, YYYYMM, YYYY)
+    -- Chuẩn hóa ngày sinh (YYYYMMDD, YYYYMM, YYYY) kèm kiểm tra năm <= năm hiện tại
     CASE
         WHEN d.NGAY_SINH IS NULL THEN NULL
+        WHEN NOT REGEXP_LIKE(TO_CHAR(d.NGAY_SINH), '^(19|20)\d{2}') THEN NULL
+        WHEN TO_NUMBER(SUBSTR(TO_CHAR(d.NGAY_SINH), 1, 4)) NOT BETWEEN 1900 AND EXTRACT(YEAR FROM SYSDATE) THEN NULL
         WHEN REGEXP_LIKE(TO_CHAR(d.NGAY_SINH), '^(19|20)\d{2}$') THEN TO_CHAR(d.NGAY_SINH)
         WHEN REGEXP_LIKE(TO_CHAR(d.NGAY_SINH), '^(19|20)\d{2}0000$') THEN SUBSTR(TO_CHAR(d.NGAY_SINH), 1, 4)
         WHEN REGEXP_LIKE(TO_CHAR(d.NGAY_SINH), '^(19|20)\d{2}(0[1-9]|1[0-2])00$') THEN SUBSTR(TO_CHAR(d.NGAY_SINH), 1, 6)
         WHEN REGEXP_LIKE(TO_CHAR(d.NGAY_SINH), '^(19|20)\d{2}(0[1-9]|1[0-2])$') THEN TO_CHAR(d.NGAY_SINH)
-        WHEN VALIDATE_CONVERSION(TO_CHAR(d.NGAY_SINH) AS DATE, 'YYYYMMDD') = 1
-             AND TO_NUMBER(SUBSTR(TO_CHAR(d.NGAY_SINH), 1, 4)) BETWEEN 1900 AND EXTRACT(YEAR FROM SYSDATE)
+        WHEN REGEXP_LIKE(TO_CHAR(d.NGAY_SINH), '^(19|20)\d{6}$')
+             AND VALIDATE_CONVERSION(TO_CHAR(d.NGAY_SINH) AS DATE, 'YYYYMMDD') = 1
              THEN TO_CHAR(d.NGAY_SINH)
         ELSE NULL
     END AS NGAY_SINH_CHUAN,
@@ -113,13 +136,23 @@ SELECT
              WHEN mx.MA_XA_MOI IS NULL THEN 'XA_KHONG_MAP;' END ||
         CASE WHEN mx.MA_TINH_MOI IS NOT NULL AND mt.MA_TINH_MOI IS NOT NULL
                   AND mx.MA_TINH_MOI <> mt.MA_TINH_MOI THEN 'TINH_LECH_XA;' END ||
-        CASE WHEN d.NGAY_SINH IS NULL OR NOT (
-                  REGEXP_LIKE(TO_CHAR(d.NGAY_SINH), '^(19|20)\d{2}(0000|(0[1-9]|1[0-2])00|0[1-9]|1[0-2])?$')
-                  OR (
-                      LENGTH(TO_CHAR(d.NGAY_SINH)) = 8
-                      AND VALIDATE_CONVERSION(TO_CHAR(d.NGAY_SINH) AS DATE, 'YYYYMMDD') = 1
-                      AND TO_NUMBER(SUBSTR(TO_CHAR(d.NGAY_SINH), 1, 4)) BETWEEN 1900 AND EXTRACT(YEAR FROM SYSDATE)
-                  )
+        CASE WHEN TRIM(d.MA_TINH_LH) IS NOT NULL AND COALESCE(mx_lh.MA_TINH_MOI, mt_lh.MA_TINH_MOI) IS NULL
+             THEN 'TINH_LH_KHONG_MAP;' END ||
+        CASE WHEN TRIM(d.MA_XA_LH) IS NOT NULL AND mx_lh.NGUON_MAP = 'MO_HO' THEN 'XA_LH_MO_HO;'
+             WHEN TRIM(d.MA_XA_LH) IS NOT NULL AND mx_lh.MA_XA_MOI IS NULL THEN 'XA_LH_KHONG_MAP;' END ||
+        CASE WHEN TRIM(d.MA_TINH_KS) IS NOT NULL AND COALESCE(mx_ks.MA_TINH_MOI, mt_ks.MA_TINH_MOI) IS NULL
+             THEN 'TINH_KS_KHONG_MAP;' END ||
+        CASE WHEN TRIM(d.MA_XA_KS) IS NOT NULL AND mx_ks.NGUON_MAP = 'MO_HO' THEN 'XA_KS_MO_HO;'
+             WHEN TRIM(d.MA_XA_KS) IS NOT NULL AND mx_ks.MA_XA_MOI IS NULL THEN 'XA_KS_KHONG_MAP;' END ||
+        CASE WHEN d.NGAY_SINH IS NULL THEN 'NGAY_SINH_LOI;'
+             WHEN NOT REGEXP_LIKE(TO_CHAR(d.NGAY_SINH), '^(19|20)\d{2}') THEN 'NGAY_SINH_LOI;'
+             WHEN TO_NUMBER(SUBSTR(TO_CHAR(d.NGAY_SINH), 1, 4)) NOT BETWEEN 1900 AND EXTRACT(YEAR FROM SYSDATE) THEN 'NGAY_SINH_LOI;'
+             WHEN NOT (
+                 REGEXP_LIKE(TO_CHAR(d.NGAY_SINH), '^(19|20)\d{2}(0000|(0[1-9]|1[0-2])00|0[1-9]|1[0-2])?$')
+                 OR (
+                     REGEXP_LIKE(TO_CHAR(d.NGAY_SINH), '^(19|20)\d{6}$')
+                     AND VALIDATE_CONVERSION(TO_CHAR(d.NGAY_SINH) AS DATE, 'YYYYMMDD') = 1
+                 )
              ) THEN 'NGAY_SINH_LOI;' END ||
         CASE WHEN d.PHONE_NUMBER IS NOT NULL AND NOT REGEXP_LIKE(REPLACE(d.PHONE_NUMBER, ' ', ''), '^(0\d{9,10}|840\d{9,10}|84[1-9]\d{8,9}|[1-9]\d{8})$')
              THEN 'SDT_LOI;' END ||
@@ -309,12 +342,16 @@ CREATE OR REPLACE PACKAGE BODY C360.PKG_C360_SYNC AS
     END PRC_REFRESH_DBHC_MAPS;
 
     -- ==========================================================================
-    -- 2. CHẠY FULL LOAD (CÓ KHÓA ĐỒNG BỘ VỚI NEAR REAL-TIME QUA C360_SYNC_CONTROL)
+    -- 2. CHẠY FULL LOAD (BUILD STAGING -> VALIDATE -> ATOMIC PUBLISH)
+    -- Không dùng TRUNCATE trực tiếp lên bảng chính C360_THONG_TIN_CA_NHAN để
+    -- đảm bảo không mất dữ liệu cũ nếu bước nạp/validate thất bại giữa chừng.
     -- ==========================================================================
     PROCEDURE PRC_RUN_FULL_LOAD IS
         v_batch_id       NUMBER;
         v_running_mode   VARCHAR2(20);
         v_snapshot_time  TIMESTAMP;
+        v_mirror_valid   NUMBER := 0;
+        v_stg_cnt        NUMBER := 0;
         v_merged_rows    NUMBER := 0;
         v_err_msg        VARCHAR2(2000);
     BEGIN
@@ -343,12 +380,12 @@ CREATE OR REPLACE PACKAGE BODY C360.PKG_C360_SYNC AS
         -- Bước 3: Ghi nhận mốc thời gian snapshot trước khi đọc Mirror
         v_snapshot_time := SYSTIMESTAMP - NUMTODSINTERVAL(2, 'SECOND');
 
-        -- Bước 4: Làm mới bảng Map & nạp lại bảng C360_THONG_TIN_CA_NHAN
+        -- Bước 4: Làm mới bảng Map & build toàn bộ dữ liệu vào bảng STAGING trước
         PRC_REFRESH_DBHC_MAPS;
 
-        EXECUTE IMMEDIATE 'TRUNCATE TABLE C360.C360_THONG_TIN_CA_NHAN';
+        EXECUTE IMMEDIATE 'TRUNCATE TABLE C360.C360_THONG_TIN_CA_NHAN_STG';
 
-        INSERT /*+ APPEND */ INTO C360.C360_THONG_TIN_CA_NHAN (
+        INSERT /*+ APPEND */ INTO C360.C360_THONG_TIN_CA_NHAN_STG (
             MA_SO_BHXH, MA_SO_BHXH_CU, MA_HO_GD, IS_CHU_HO, QH_CHU_HO, TEN_QH_CHU_HO,
             HO_TEN, HO_TEN_KHONG_DAU, GIOI_TINH, NGAY_SINH_CHUAN, NGAY_SINH_GOC,
             SO_DINH_DANH, SO_CCCD_GOC, SO_CMTND_GOC, SO_DIEN_THOAI_CHUAN, SO_DIEN_THOAI_GOC, EMAIL,
@@ -372,13 +409,51 @@ CREATE OR REPLACE PACKAGE BODY C360.PKG_C360_SYNC AS
             SOURCE_CREATED_DATE, SOURCE_MODIFY_DATE, SOURCE_RECORD_ID, SYSTIMESTAMP
         FROM C360.VW_C360_TRANSFORM_SOURCE;
 
-        v_merged_rows := SQL%ROWCOUNT;
+        v_stg_cnt := SQL%ROWCOUNT;
         COMMIT;
 
-        -- Bước 5: Chỉ xóa các dòng Queue đã nằm trong snapshot của lần Full Load đó
-        -- Giữ lại các thay đổi phát sinh trong lúc Full Load đang chạy để phút sau xử lý tiếp!
+        -- Bước 5: Validate dữ liệu Staging trước khi đụng vào bảng chính C360_THONG_TIN_CA_NHAN
+        SELECT COUNT(DISTINCT m.MA_CD) INTO v_mirror_valid
+        FROM C360.MIRROR_VSS_HO_GD_NHANKHAU m
+        WHERE NVL(m.TYPEID, 'ZZ') NOT IN ('GT', 'GM', 'GG', 'GK')
+          AND NVL(m.TRANG_THAI_DUYET, 0) NOT IN (1, 3, 4);
+
+        IF v_mirror_valid > 0 AND v_stg_cnt = 0 THEN
+            RAISE_APPLICATION_ERROR(-20001, 'Staging validation failed: 0 rows built while Mirror has valid citizens.');
+        END IF;
+
+        -- Bước 6: Publish atomic trong 1 transaction (có thể ROLLBACK khôi phục bảng chính nếu lỗi)
+        DELETE FROM C360.C360_THONG_TIN_CA_NHAN;
+
+        INSERT INTO C360.C360_THONG_TIN_CA_NHAN (
+            MA_SO_BHXH, MA_SO_BHXH_CU, MA_HO_GD, IS_CHU_HO, QH_CHU_HO, TEN_QH_CHU_HO,
+            HO_TEN, HO_TEN_KHONG_DAU, GIOI_TINH, NGAY_SINH_CHUAN, NGAY_SINH_GOC,
+            SO_DINH_DANH, SO_CCCD_GOC, SO_CMTND_GOC, SO_DIEN_THOAI_CHUAN, SO_DIEN_THOAI_GOC, EMAIL,
+            DAN_TOC_ID_GOC, MA_DAN_TOC, TEN_DAN_TOC, QUOC_TICH_GOC, MA_QUOC_TICH, TEN_QUOC_TICH,
+            MA_TINH_GOC, MA_XA_GOC, MA_TINH_CHUAN, TEN_TINH_CHUAN, MA_XA_CHUAN, TEN_XA_CHUAN, DIA_CHI_CHI_TIET,
+            MA_TINH_LH_GOC, MA_XA_LH_GOC, MA_TINH_LH_CHUAN, TEN_TINH_LH_CHUAN, MA_XA_LH_CHUAN, TEN_XA_LH_CHUAN, DC_LIEN_LAC,
+            MA_TINH_KS_GOC, MA_XA_KS_GOC, MA_TINH_KS_CHUAN, TEN_TINH_KS_CHUAN, MA_XA_KS_CHUAN, TEN_XA_KS_CHUAN,
+            IS_ALIVE, DEAD_DATE, XAC_THUC_BCA, DQ_FLAGS, IS_CLEAN,
+            SOURCE_CREATED_DATE, SOURCE_MODIFY_DATE, SOURCE_RECORD_ID, SYNC_DATE
+        )
+        SELECT
+            MA_SO_BHXH, MA_SO_BHXH_CU, MA_HO_GD, IS_CHU_HO, QH_CHU_HO, TEN_QH_CHU_HO,
+            HO_TEN, HO_TEN_KHONG_DAU, GIOI_TINH, NGAY_SINH_CHUAN, NGAY_SINH_GOC,
+            SO_DINH_DANH, SO_CCCD_GOC, SO_CMTND_GOC, SO_DIEN_THOAI_CHUAN, SO_DIEN_THOAI_GOC, EMAIL,
+            DAN_TOC_ID_GOC, MA_DAN_TOC, TEN_DAN_TOC, QUOC_TICH_GOC, MA_QUOC_TICH, TEN_QUOC_TICH,
+            MA_TINH_GOC, MA_XA_GOC, MA_TINH_CHUAN, TEN_TINH_CHUAN, MA_XA_CHUAN, TEN_XA_CHUAN, DIA_CHI_CHI_TIET,
+            MA_TINH_LH_GOC, MA_XA_LH_GOC, MA_TINH_LH_CHUAN, TEN_TINH_LH_CHUAN, MA_XA_LH_CHUAN, TEN_XA_LH_CHUAN, DC_LIEN_LAC,
+            MA_TINH_KS_GOC, MA_XA_KS_GOC, MA_TINH_KS_CHUAN, TEN_TINH_KS_CHUAN, MA_XA_KS_CHUAN, TEN_XA_KS_CHUAN,
+            IS_ALIVE, DEAD_DATE, XAC_THUC_BCA, DQ_FLAGS, IS_CLEAN,
+            SOURCE_CREATED_DATE, SOURCE_MODIFY_DATE, SOURCE_RECORD_ID, SYNC_DATE
+        FROM C360.C360_THONG_TIN_CA_NHAN_STG;
+
+        v_merged_rows := SQL%ROWCOUNT;
+
+        -- Chỉ xóa các dòng Queue 'NEW' đã nằm trước mốc snapshot của lần Full Load đó
         DELETE FROM C360.C360_SYNC_QUEUE
-        WHERE ENQUEUED_AT <= v_snapshot_time;
+        WHERE STATUS = 'NEW'
+          AND ENQUEUED_AT <= v_snapshot_time;
 
         UPDATE C360.C360_SYNC_CONTROL
         SET IS_PAUSED_FOR_FULL = 0,
@@ -411,24 +486,37 @@ CREATE OR REPLACE PACKAGE BODY C360.PKG_C360_SYNC AS
     END PRC_RUN_FULL_LOAD;
 
     -- ==========================================================================
-    -- 3. CHẠY NEAR REAL-TIME TỪ HÀNG ĐỢI QUEUE (MỖI PHÚT 1 LẦN)
-    -- - Xử lý đua tranh: Cắt lô theo thời gian an toàn v_cut_time = SYSTIMESTAMP - p_safety_lag_seconds
-    --   kết hợp v_max_queue_id để tránh bỏ sót các transaction commit lệch thứ tự ID.
-    -- - MERGE các MA_CD còn dòng hợp lệ ở Mirror + DELETE các MA_CD không còn dòng hợp lệ.
+    -- 3. CHẠY NEAR REAL-TIME TỪ HÀNG ĐỢI QUEUE (AN TOÀN LEASE + SKIP LOCKED)
+    -- - Không dựa vào MAX(QUEUE_ID) để xóa hàng loạt -> tránh mất transaction commit muộn.
+    -- - Claim từng QUEUE_ID cụ thể bằng FOR UPDATE SKIP LOCKED + CLAIMED_BATCH_ID.
+    -- - Tự động reclaim bản ghi PROCESSING quá hạn lease (> 10 phút) khi worker crash.
+    -- - Ghi đầy đủ UPSERT & DELETE vào C360_CHANGE_LOG phục vụ API Delta.
     -- ==========================================================================
     PROCEDURE PRC_RUN_NEAR_REALTIME_BATCH(p_safety_lag_seconds IN NUMBER DEFAULT 2) IS
         e_resource_busy  EXCEPTION;
         PRAGMA EXCEPTION_INIT(e_resource_busy, -54);
 
+        TYPE t_num_tab IS TABLE OF NUMBER;
+        TYPE t_macd_tab IS TABLE OF VARCHAR2(30 BYTE);
+
         v_is_paused      NUMBER(1);
         v_batch_id       NUMBER;
         v_start_time     TIMESTAMP := SYSTIMESTAMP;
         v_cut_time       TIMESTAMP;
-        v_max_queue_id   NUMBER;
+        v_claimed_ids    t_num_tab;
+        v_deleted_macds  t_macd_tab;
         v_distinct_cnt   NUMBER := 0;
         v_merged_rows    NUMBER := 0;
         v_deleted_rows   NUMBER := 0;
         v_err_msg        VARCHAR2(2000 BYTE);
+
+        CURSOR c_claim_queue(p_cut_ts TIMESTAMP) IS
+            SELECT QUEUE_ID
+            FROM C360.C360_SYNC_QUEUE
+            WHERE STATUS = 'NEW'
+              AND ENQUEUED_AT <= p_cut_ts
+            ORDER BY QUEUE_ID
+            FOR UPDATE SKIP LOCKED;
     BEGIN
         -- Bước 1: Khóa dòng điều khiển, kiểm tra nếu Full Load đang yêu cầu dừng thì thoát ngay
         SELECT IS_PAUSED_FOR_FULL INTO v_is_paused
@@ -441,28 +529,49 @@ CREATE OR REPLACE PACKAGE BODY C360.PKG_C360_SYNC AS
             RETURN;
         END IF;
 
-        -- Bước 2: Xác định mốc cắt lô an toàn (v_cut_time & v_max_queue_id)
+        -- Bước 2: Thu hồi các dòng PROCESSING quá hạn lease (> 10 phút) nếu worker trước bị crash
+        UPDATE C360.C360_SYNC_QUEUE
+        SET STATUS = 'NEW',
+            CLAIMED_BATCH_ID = NULL,
+            CLAIMED_AT = NULL
+        WHERE STATUS = 'PROCESSING'
+          AND CLAIMED_AT < SYSTIMESTAMP - NUMTODSINTERVAL(10, 'MINUTE');
+
+        -- Bước 3: Claim đích danh từng QUEUE_ID sẵn sàng bằng FOR UPDATE SKIP LOCKED
         v_cut_time := SYSTIMESTAMP - NUMTODSINTERVAL(p_safety_lag_seconds, 'SECOND');
 
-        SELECT MAX(QUEUE_ID), COUNT(DISTINCT MA_CD)
-        INTO v_max_queue_id, v_distinct_cnt
-        FROM C360.C360_SYNC_QUEUE
-        WHERE ENQUEUED_AT <= v_cut_time;
+        OPEN c_claim_queue(v_cut_time);
+        FETCH c_claim_queue BULK COLLECT INTO v_claimed_ids;
+        CLOSE c_claim_queue;
 
-        IF v_max_queue_id IS NULL OR v_distinct_cnt = 0 THEN
+        IF v_claimed_ids IS NULL OR v_claimed_ids.COUNT = 0 THEN
             ROLLBACK;
             RETURN;
         END IF;
+
+        INSERT INTO C360.C360_SYNC_LOG (RUN_MODE, START_TIME, DISTINCT_MACD_CNT, STATUS)
+        VALUES ('NEAR_RT', SYSTIMESTAMP, 0, 'RUNNING')
+        RETURNING BATCH_ID INTO v_batch_id;
+
+        FORALL i IN 1 .. v_claimed_ids.COUNT
+            UPDATE C360.C360_SYNC_QUEUE
+            SET STATUS = 'PROCESSING',
+                CLAIMED_BATCH_ID = v_batch_id,
+                CLAIMED_AT = SYSTIMESTAMP
+            WHERE QUEUE_ID = v_claimed_ids(i);
+
+        SELECT COUNT(DISTINCT MA_CD) INTO v_distinct_cnt
+        FROM C360.C360_SYNC_QUEUE
+        WHERE CLAIMED_BATCH_ID = v_batch_id;
 
         UPDATE C360.C360_SYNC_CONTROL
         SET RUNNING_MODE = 'NEAR_RT', UPDATED_AT = SYSTIMESTAMP
         WHERE PIPELINE_NAME = 'C360_CITIZEN_PIPELINE';
 
-        INSERT INTO C360.C360_SYNC_LOG (RUN_MODE, START_TIME, DISTINCT_MACD_CNT, STATUS)
-        VALUES ('NEAR_RT', SYSTIMESTAMP, v_distinct_cnt, 'RUNNING')
-        RETURNING BATCH_ID INTO v_batch_id;
+        -- Commit bước claim để nếu xảy ra lỗi phía sau có thể giữ lại trạng thái retry bền vững
+        COMMIT;
 
-        -- Bước 3: MERGE lại các MA_CD trong lô còn dòng hợp lệ trên Mirror
+        -- Bước 4: MERGE các MA_CD trong lô còn dòng hợp lệ trên Mirror
         MERGE INTO C360.C360_THONG_TIN_CA_NHAN tgt
         USING (
             SELECT src.*
@@ -470,8 +579,7 @@ CREATE OR REPLACE PACKAGE BODY C360.PKG_C360_SYNC AS
             WHERE src.MA_SO_BHXH IN (
                 SELECT DISTINCT q.MA_CD
                 FROM C360.C360_SYNC_QUEUE q
-                WHERE q.QUEUE_ID <= v_max_queue_id
-                  AND q.ENQUEUED_AT <= v_cut_time
+                WHERE q.CLAIMED_BATCH_ID = v_batch_id
             )
         ) src
         ON (tgt.MA_SO_BHXH = src.MA_SO_BHXH)
@@ -551,14 +659,21 @@ CREATE OR REPLACE PACKAGE BODY C360.PKG_C360_SYNC AS
         );
         v_merged_rows := SQL%ROWCOUNT;
 
-        -- Bước 4: DELETE khỏi C360 những MA_CD trong lô không còn dòng hợp lệ nào ở Mirror
-        -- (do bị xóa ở nguồn, bị đổi MA_CD, hoặc chuyển sang TYPEID/TRANG_THAI_DUYET bị lọc)
+        INSERT INTO C360.C360_CHANGE_LOG (MA_SO_BHXH, OPERATION, BATCH_ID)
+        SELECT DISTINCT src.MA_SO_BHXH, 'UPSERT', v_batch_id
+        FROM C360.VW_C360_TRANSFORM_SOURCE src
+        WHERE src.MA_SO_BHXH IN (
+            SELECT DISTINCT q.MA_CD
+            FROM C360.C360_SYNC_QUEUE q
+            WHERE q.CLAIMED_BATCH_ID = v_batch_id
+        );
+
+        -- Bước 5: DELETE khỏi C360 những MA_CD trong lô không còn dòng hợp lệ nào ở Mirror
         DELETE FROM C360.C360_THONG_TIN_CA_NHAN tgt
         WHERE tgt.MA_SO_BHXH IN (
             SELECT DISTINCT q.MA_CD
             FROM C360.C360_SYNC_QUEUE q
-            WHERE q.QUEUE_ID <= v_max_queue_id
-              AND q.ENQUEUED_AT <= v_cut_time
+            WHERE q.CLAIMED_BATCH_ID = v_batch_id
         )
         AND NOT EXISTS (
             SELECT 1
@@ -566,13 +681,19 @@ CREATE OR REPLACE PACKAGE BODY C360.PKG_C360_SYNC AS
             WHERE m.MA_CD = tgt.MA_SO_BHXH
               AND NVL(m.TYPEID, 'ZZ') NOT IN ('GT', 'GM', 'GG', 'GK')
               AND NVL(m.TRANG_THAI_DUYET, 0) NOT IN (1, 3, 4)
-        );
+        )
+        RETURNING tgt.MA_SO_BHXH BULK COLLECT INTO v_deleted_macds;
         v_deleted_rows := SQL%ROWCOUNT;
 
-        -- Bước 5: Xóa đúng các dòng Queue đã xử lý xong
+        IF v_deleted_macds IS NOT NULL AND v_deleted_macds.COUNT > 0 THEN
+            FORALL i IN 1 .. v_deleted_macds.COUNT
+                INSERT INTO C360.C360_CHANGE_LOG (MA_SO_BHXH, OPERATION, BATCH_ID)
+                VALUES (v_deleted_macds(i), 'DELETE', v_batch_id);
+        END IF;
+
+        -- Bước 6: Chỉ xóa đúng các dòng Queue đã được lô này claim và xử lý thành công
         DELETE FROM C360.C360_SYNC_QUEUE
-        WHERE QUEUE_ID <= v_max_queue_id
-          AND ENQUEUED_AT <= v_cut_time;
+        WHERE CLAIMED_BATCH_ID = v_batch_id;
 
         UPDATE C360.C360_SYNC_CONTROL
         SET RUNNING_MODE = 'IDLE',
@@ -582,6 +703,7 @@ CREATE OR REPLACE PACKAGE BODY C360.PKG_C360_SYNC AS
 
         UPDATE C360.C360_SYNC_LOG
         SET END_TIME = SYSTIMESTAMP,
+            DISTINCT_MACD_CNT = v_distinct_cnt,
             MERGED_ROWS = v_merged_rows,
             DELETED_ROWS = v_deleted_rows,
             STATUS = 'SUCCESS'
@@ -597,11 +719,23 @@ CREATE OR REPLACE PACKAGE BODY C360.PKG_C360_SYNC AS
             v_err_msg := SUBSTRB(SQLERRM, 1, 2000);
             ROLLBACK;
             IF v_batch_id IS NOT NULL THEN
-                INSERT INTO C360.C360_SYNC_LOG (
-                    RUN_MODE, START_TIME, END_TIME, DISTINCT_MACD_CNT, STATUS, ERROR_MESSAGE
-                ) VALUES (
-                    'NEAR_RT', v_start_time, SYSTIMESTAMP, v_distinct_cnt, 'FAILED', v_err_msg
-                );
+                UPDATE C360.C360_SYNC_QUEUE
+                SET RETRY_COUNT = RETRY_COUNT + 1,
+                    STATUS = CASE WHEN RETRY_COUNT + 1 >= 5 THEN 'FAILED' ELSE 'NEW' END,
+                    CLAIMED_BATCH_ID = NULL,
+                    CLAIMED_AT = NULL
+                WHERE CLAIMED_BATCH_ID = v_batch_id;
+
+                UPDATE C360.C360_SYNC_CONTROL
+                SET RUNNING_MODE = 'IDLE', UPDATED_AT = SYSTIMESTAMP
+                WHERE PIPELINE_NAME = 'C360_CITIZEN_PIPELINE';
+
+                UPDATE C360.C360_SYNC_LOG
+                SET END_TIME = SYSTIMESTAMP,
+                    DISTINCT_MACD_CNT = v_distinct_cnt,
+                    STATUS = 'FAILED',
+                    ERROR_MESSAGE = v_err_msg
+                WHERE BATCH_ID = v_batch_id;
                 COMMIT;
             END IF;
             RAISE;

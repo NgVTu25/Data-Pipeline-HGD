@@ -13,11 +13,23 @@ SELECT
     NVL(MA_XA_CHUAN, 'UNK')    AS MA_XA,
     NVL(TEN_XA_CHUAN, 'Chưa xác định')   AS TEN_XA,
     GIOI_TINH,
-    NVL(IS_ALIVE, '1')         AS IS_ALIVE,
+    NVL(IS_ALIVE, 'U')         AS IS_ALIVE,
     CASE
         WHEN NGAY_SINH_CHUAN IS NULL THEN 'Không rõ'
-        WHEN EXTRACT(YEAR FROM SYSDATE) - TO_NUMBER(SUBSTR(NGAY_SINH_CHUAN, 1, 4)) < 15 THEN '0-14 tuổi'
-        WHEN EXTRACT(YEAR FROM SYSDATE) - TO_NUMBER(SUBSTR(NGAY_SINH_CHUAN, 1, 4)) <= 60 THEN '15-60 tuổi (Lao động)'
+        WHEN (
+            CASE
+                WHEN LENGTH(NGAY_SINH_CHUAN) = 8
+                    THEN FLOOR(MONTHS_BETWEEN(SYSDATE, TO_DATE(NGAY_SINH_CHUAN, 'YYYYMMDD')) / 12)
+                ELSE EXTRACT(YEAR FROM SYSDATE) - TO_NUMBER(SUBSTR(NGAY_SINH_CHUAN, 1, 4))
+            END
+        ) < 15 THEN '0-14 tuổi'
+        WHEN (
+            CASE
+                WHEN LENGTH(NGAY_SINH_CHUAN) = 8
+                    THEN FLOOR(MONTHS_BETWEEN(SYSDATE, TO_DATE(NGAY_SINH_CHUAN, 'YYYYMMDD')) / 12)
+                ELSE EXTRACT(YEAR FROM SYSDATE) - TO_NUMBER(SUBSTR(NGAY_SINH_CHUAN, 1, 4))
+            END
+        ) <= 60 THEN '15-60 tuổi (Lao động)'
         ELSE 'Trên 60 tuổi'
     END AS NHOM_TUOI,
     COUNT(*) AS TONG_CONG_DAN,
@@ -34,11 +46,23 @@ GROUP BY
     NVL(MA_XA_CHUAN, 'UNK'),
     NVL(TEN_XA_CHUAN, 'Chưa xác định'),
     GIOI_TINH,
-    NVL(IS_ALIVE, '1'),
+    NVL(IS_ALIVE, 'U'),
     CASE
         WHEN NGAY_SINH_CHUAN IS NULL THEN 'Không rõ'
-        WHEN EXTRACT(YEAR FROM SYSDATE) - TO_NUMBER(SUBSTR(NGAY_SINH_CHUAN, 1, 4)) < 15 THEN '0-14 tuổi'
-        WHEN EXTRACT(YEAR FROM SYSDATE) - TO_NUMBER(SUBSTR(NGAY_SINH_CHUAN, 1, 4)) <= 60 THEN '15-60 tuổi (Lao động)'
+        WHEN (
+            CASE
+                WHEN LENGTH(NGAY_SINH_CHUAN) = 8
+                    THEN FLOOR(MONTHS_BETWEEN(SYSDATE, TO_DATE(NGAY_SINH_CHUAN, 'YYYYMMDD')) / 12)
+                ELSE EXTRACT(YEAR FROM SYSDATE) - TO_NUMBER(SUBSTR(NGAY_SINH_CHUAN, 1, 4))
+            END
+        ) < 15 THEN '0-14 tuổi'
+        WHEN (
+            CASE
+                WHEN LENGTH(NGAY_SINH_CHUAN) = 8
+                    THEN FLOOR(MONTHS_BETWEEN(SYSDATE, TO_DATE(NGAY_SINH_CHUAN, 'YYYYMMDD')) / 12)
+                ELSE EXTRACT(YEAR FROM SYSDATE) - TO_NUMBER(SUBSTR(NGAY_SINH_CHUAN, 1, 4))
+            END
+        ) <= 60 THEN '15-60 tuổi (Lao động)'
         ELSE 'Trên 60 tuổi'
     END;
 
