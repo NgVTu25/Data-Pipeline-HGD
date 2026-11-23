@@ -6,7 +6,7 @@
     "topics": "vss_cdc.VSS.VSS_HO_GD_NHANKHAU",
     "connection.url": "jdbc:oracle:thin:@//hgd-oracle:1521/FREEPDB1",
     "connection.username": "C360",
-    "connection.password": "c360_pwd",
+    "connection.password": "${file:/kafka/connect/secrets.properties:C360_PASSWORD}",
     "table.name.format": "C360.MIRROR_VSS_HO_GD_NHANKHAU",
     "insert.mode": "upsert",
     "delete.enabled": "true",

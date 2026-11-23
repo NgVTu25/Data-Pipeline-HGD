@@ -30,7 +30,7 @@ class DatabaseConfig:
 SOURCE_DB = DatabaseConfig(
     host=os.getenv("SOURCE_DB_HOST", "localhost"),
     port=int(os.getenv("SOURCE_DB_PORT", "1521")),
-    service=os.getenv("SOURCE_DB_SERVICE", "ORCLPDB1"),
+    service=os.getenv("SOURCE_DB_SERVICE", "FREEPDB1"),
     user=os.getenv("SOURCE_DB_USER", "vss_source"),
     password=os.getenv("SOURCE_DB_PASSWORD", ""),
     schema=os.getenv("SOURCE_DB_SCHEMA", "VSS"),
@@ -39,12 +39,13 @@ SOURCE_DB = DatabaseConfig(
 TARGET_DB = DatabaseConfig(
     host=os.getenv("TARGET_DB_HOST", "localhost"),
     port=int(os.getenv("TARGET_DB_PORT", "1521")),
-    service=os.getenv("TARGET_DB_SERVICE", "ORCLPDB1"),
+    service=os.getenv("TARGET_DB_SERVICE", "FREEPDB1"),
     user=os.getenv("TARGET_DB_USER", "c360_target"),
     password=os.getenv("TARGET_DB_PASSWORD", ""),
     schema=os.getenv("TARGET_DB_SCHEMA", "C360"),
 )
 
+APP_ENV = os.getenv("APP_ENV", "development").lower()
 SEED_NUM_CITIZENS = int(os.getenv("SEED_NUM_CITIZENS", "50000"))
 SEED_BATCH_SIZE = int(os.getenv("SEED_BATCH_SIZE", "5000"))
 JDBC_NUM_PARTITIONS = int(os.getenv("JDBC_NUM_PARTITIONS", "16"))

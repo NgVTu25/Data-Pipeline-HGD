@@ -6,7 +6,7 @@ services:
     ports:
       - "1521:1521"
     environment:
-      ORACLE_PASSWORD: OraclePassword123
+      ORACLE_PASSWORD: ${ORACLE_PASSWORD:-OraclePassword123}
     volumes:
       - oracle_data:/opt/oracle/oradata
       - ./sql:/opt/oracle/scripts/custom_sql
@@ -51,7 +51,7 @@ services:
       start_period: 15s
 
   debezium-connect:
-    image: quay.io/debezium/connect:latest
+    image: quay.io/debezium/connect:2.7.3.Final
     container_name: hgd-debezium-connect
     restart: unless-stopped
     depends_on:
@@ -65,6 +65,14 @@ services:
       CONFIG_STORAGE_TOPIC: my_connect_configs
       OFFSET_STORAGE_TOPIC: my_connect_offsets
       STATUS_STORAGE_TOPIC: my_connect_statuses
+      CONFIG_PROVIDERS: file
+      CONFIG_PROVIDERS_FILE_CLASS: org.apache.kafka.common.config.provider.FileConfigProvider
+    healthcheck:
+      test: ["CMD-SHELL", "curl -sf http://localhost:8083/connectors || exit 1"]
+      interval: 10s
+      timeout: 5s
+      retries: 12
+      start_period: 20s
     volumes:
       - ./drivers/ojdbc11.jar:/kafka/connect/debezium-connector-oracle/ojdbc11.jar:ro
       - ./drivers/ojdbc11.jar:/kafka/connect/debezium-connector-jdbc/ojdbc11.jar:ro

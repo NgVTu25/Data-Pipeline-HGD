@@ -47,6 +47,29 @@ RECONCILIATION_QUERIES: Dict[str, str] = {
         FROM MIRROR_VALID m
         CROSS JOIN C360_TOTAL c
     """,
+    "CHECK_MIRROR_VS_C360_KEY_DIFF": """
+        WITH PENDING_Q AS (
+            SELECT DISTINCT MA_CD FROM C360.C360_SYNC_QUEUE
+        ),
+        MIRROR_VALID_KEYS AS (
+            SELECT DISTINCT m.MA_CD
+            FROM C360.MIRROR_VSS_HO_GD_NHANKHAU m
+            WHERE NVL(m.TYPEID, 'ZZ') NOT IN ('GT', 'GM', 'GG', 'GK')
+              AND NVL(m.TRANG_THAI_DUYET, 0) NOT IN (1, 3, 4)
+              AND NOT EXISTS (SELECT 1 FROM PENDING_Q q WHERE q.MA_CD = m.MA_CD)
+        ),
+        C360_KEYS AS (
+            SELECT c.MA_SO_BHXH AS MA_CD
+            FROM C360.C360_THONG_TIN_CA_NHAN c
+            WHERE NOT EXISTS (SELECT 1 FROM PENDING_Q q WHERE q.MA_CD = c.MA_SO_BHXH)
+        )
+        SELECT
+            (SELECT COUNT(*) FROM MIRROR_VALID_KEYS mk
+             WHERE NOT EXISTS (SELECT 1 FROM C360_KEYS ck WHERE ck.MA_CD = mk.MA_CD)) AS MISSING_IN_C360_COUNT,
+            (SELECT COUNT(*) FROM C360_KEYS ck
+             WHERE NOT EXISTS (SELECT 1 FROM MIRROR_VALID_KEYS mk WHERE mk.MA_CD = ck.MA_CD)) AS EXTRA_IN_C360_COUNT
+        FROM DUAL
+    """,
     "CHECK_MULTI_HOUSEHOLD_LATEST_PICK": """
         WITH PENDING_Q AS (
             SELECT DISTINCT MA_CD FROM C360.C360_SYNC_QUEUE
@@ -106,19 +129,35 @@ def run_reconciliation() -> Dict[str, Any]:
         with src_conn.cursor() as cur:
             cur.execute(f"SELECT COUNT(*) FROM {SOURCE_DB.schema}.VSS_HO_GD_NHANKHAU")
             vss_rows = int(cur.fetchone()[0])
+            cur.execute(f"""
+                SELECT NVL(TRIM(MA_TINH), 'NULL') AS MA_TINH, COUNT(*) AS CNT
+                FROM {SOURCE_DB.schema}.VSS_HO_GD_NHANKHAU
+                GROUP BY NVL(TRIM(MA_TINH), 'NULL')
+            """)
+            src_province_counts = {str(r[0]): int(r[1]) for r in cur.fetchall()}
 
     with oracledb.connect(user=TARGET_DB.user, password=TARGET_DB.password, dsn=TARGET_DB.dsn) as tgt_conn:
         with tgt_conn.cursor() as cur:
             cur.execute("SET TRANSACTION READ ONLY")
             cur.execute(f"SELECT COUNT(*) FROM {TARGET_DB.schema}.MIRROR_VSS_HO_GD_NHANKHAU")
             mirror_rows = int(cur.fetchone()[0])
+            cur.execute(f"""
+                SELECT NVL(TRIM(MA_TINH), 'NULL') AS MA_TINH, COUNT(*) AS CNT
+                FROM {TARGET_DB.schema}.MIRROR_VSS_HO_GD_NHANKHAU
+                GROUP BY NVL(TRIM(MA_TINH), 'NULL')
+            """)
+            mirror_province_counts = {str(r[0]): int(r[1]) for r in cur.fetchall()}
             cur.execute("SELECT COUNT(DISTINCT MA_CD) FROM C360.C360_SYNC_QUEUE")
             in_flight_q = int(cur.fetchone()[0])
 
             diff_src_mirror = vss_rows - mirror_rows
-            # Khi luồng CDC đang bơm liên tục (in_flight_q > 0), chênh lệch nhỏ (<= 5 dòng vừa commit < 2s) là in-flight lag hợp lệ
-            src_mirror_ok = (diff_src_mirror == 0) or (in_flight_q > 0 and abs(diff_src_mirror) <= 5)
-            src_mirror_status = "PASS" if src_mirror_ok else "FAIL"
+            if diff_src_mirror == 0:
+                src_mirror_status = "PASS"
+            elif in_flight_q > 0 and abs(diff_src_mirror) <= 5:
+                src_mirror_status = "IN_PROGRESS"
+            else:
+                src_mirror_status = "FAIL"
+
             report["checks"]["CHECK_SOURCE_VS_MIRROR_COUNT"] = {
                 "vss_rows": vss_rows,
                 "mirror_rows": mirror_rows,
@@ -127,13 +166,39 @@ def run_reconciliation() -> Dict[str, Any]:
                 "status": src_mirror_status,
             }
 
+            all_provinces = sorted(set(src_province_counts) | set(mirror_province_counts))
+            mismatched_provinces = []
+            for prov in all_provinces:
+                sc = src_province_counts.get(prov, 0)
+                mc = mirror_province_counts.get(prov, 0)
+                if sc != mc:
+                    mismatched_provinces.append({"ma_tinh": prov, "source": sc, "mirror": mc, "diff": sc - mc})
+
+            if not mismatched_provinces:
+                prov_status = "PASS"
+            elif in_flight_q > 0 and sum(abs(p["diff"]) for p in mismatched_provinces) <= 5:
+                prov_status = "IN_PROGRESS"
+            else:
+                prov_status = "FAIL"
+
+            report["checks"]["CHECK_SOURCE_VS_MIRROR_BY_PROVINCE"] = {
+                "total_provinces": len(all_provinces),
+                "mismatched_count": len(mismatched_provinces),
+                "mismatched_provinces": mismatched_provinces[:20],
+                "status": prov_status,
+            }
+
             for name, sql in RECONCILIATION_QUERIES.items():
                 cur.execute(sql)
                 cols = [d[0].lower() for d in cur.description]
                 row = cur.fetchone()
                 data = {col: (int(val) if isinstance(val, (int, float)) else val) for col, val in zip(cols, row)}
 
-                if name == "CHECK_MULTI_HOUSEHOLD_LATEST_PICK":
+                if name == "CHECK_MIRROR_VS_C360_KEY_DIFF":
+                    missing_cnt = data.get("missing_in_c360_count", 0)
+                    extra_cnt = data.get("extra_in_c360_count", 0)
+                    data["status"] = "PASS" if (missing_cnt == 0 and extra_cnt == 0) else "FAIL"
+                elif name == "CHECK_MULTI_HOUSEHOLD_LATEST_PICK":
                     data["status"] = "PASS" if data.get("mismatch_latest_count", 0) == 0 else "FAIL"
                 elif name == "CHECK_ZERO_INVALID_OR_ORPHAN_ON_C360":
                     data["status"] = "PASS" if data.get("orphan_or_invalid_count", 0) == 0 else "FAIL"
@@ -144,10 +209,11 @@ def run_reconciliation() -> Dict[str, Any]:
 
                 report["checks"][name] = data
 
-    for check_data in report["checks"].values():
-        if check_data.get("status") == "FAIL":
-            report["overall_status"] = "FAIL"
-            break
+    statuses = [c.get("status") for c in report["checks"].values()]
+    if "FAIL" in statuses:
+        report["overall_status"] = "FAIL"
+    elif "IN_PROGRESS" in statuses:
+        report["overall_status"] = "IN_PROGRESS"
 
     return report
 
@@ -168,7 +234,7 @@ def main() -> None:
             print(f" [{detail.get('status', 'INFO'):4s}] {name}: {detail}")
         print("=" * 72)
 
-    if report["overall_status"] != "PASS":
+    if report["overall_status"] == "FAIL":
         sys.exit(1)
 
 

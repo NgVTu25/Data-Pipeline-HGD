@@ -16,6 +16,7 @@ from __future__ import annotations
 import argparse
 import json
 import random
+import unicodedata
 from collections import Counter
 from datetime import datetime, timedelta
 from typing import Any, Dict, Iterable, Iterator, List, Optional, Sequence, Tuple
@@ -275,48 +276,164 @@ def _make_address_values(
     if citizen_no <= len(LOCATION_CASES):
         idx = citizen_no - 1
         ma_tinh, ma_xa = LOCATION_CASES[idx]
-    else:
-        province_choices = [
-            ("01TTT", 0.38), ("33TTT", 0.14), ("34TTT", 0.06),
-            ("001", 0.06), ("034", 0.04), ("079", 0.04),
-            ("01", 0.04), ("34", 0.03), ("79", 0.03),
-            ("1", 0.04), ("79TTT", 0.05), ("00TTT", 0.02),
-            ("000", 0.02), ("00", 0.01), ("99TTT", 0.02), (None, 0.02),
-        ]
-        commune_choices = [
-            ("00004", 0.44), ("00013", 0.14), ("4", 0.07),
-            ("13", 0.07), ("00099", 0.06), ("12457", 0.08),
-            ("12458", 0.05), ("00000", 0.03), ("99999", 0.03), (None, 0.03),
-        ]
-        ma_tinh = _weighted_choice(rng, province_choices)
-        ma_xa = _weighted_choice(rng, commune_choices)
-
-    if citizen_no <= len(LOCATION_CASES):
-        idx = citizen_no - 1
         lh_pair = LOCATION_CASES[(idx + 5) % len(LOCATION_CASES)] if citizen_no % 2 == 0 else (ma_tinh, ma_xa)
         ks_pair = LOCATION_CASES[(idx + 9) % len(LOCATION_CASES)] if citizen_no % 3 == 0 else (ma_tinh, ma_xa)
     else:
-        lh_pair = (
-            (rng.choice(LOCATION_CASES) if rng.random() < 0.20 else (ma_tinh, ma_xa))
-        )
-        ks_pair = (
-            (rng.choice(LOCATION_CASES) if rng.random() < 0.20 else (ma_tinh, ma_xa))
-        )
+        valid_location_pairs: List[Tuple[Tuple[str, str], float]] = [
+            (("01TTT", "00004"), 0.30),
+            (("01TTT", "00013"), 0.14),
+            (("01TTT", "00008"), 0.10),
+            (("01TTT", "4"), 0.05),
+            (("001", "00004"), 0.04),
+            (("01", "13"), 0.04),
+            (("33TTT", "12457"), 0.10),
+            (("34TTT", "12458"), 0.06),
+            (("79TTT", "26734"), 0.08),
+            (("079", "26737"), 0.05),
+        ]
+        dirty_location_pairs: List[Tuple[Tuple[Optional[str], Optional[str]], float]] = [
+            (("01TTT", "00099"), 0.01),  # Xã mơ hồ
+            (("79TTT", "00004"), 0.01),  # Tỉnh lệch xã
+            (("99TTT", "99999"), 0.01),  # Mã không map
+            ((None, None), 0.01),        # Thiếu địa bàn
+        ]
+        ma_tinh, ma_xa = _weighted_choice(rng, valid_location_pairs + dirty_location_pairs)
+        clean_only_pairs = [pair for pair, _ in valid_location_pairs]
+        dirty_only_pairs = [pair for pair, _ in dirty_location_pairs]
+
+        if rng.random() < 0.02:
+            lh_pair = rng.choice(dirty_only_pairs)
+        elif rng.random() < 0.10:
+            lh_pair = rng.choice(clean_only_pairs)
+        else:
+            lh_pair = (ma_tinh, ma_xa)
+
+        if rng.random() < 0.02:
+            ks_pair = rng.choice(dirty_only_pairs)
+        elif rng.random() < 0.10:
+            ks_pair = rng.choice(clean_only_pairs)
+        else:
+            ks_pair = (ma_tinh, ma_xa)
 
     return ma_tinh, ma_xa, lh_pair[0], lh_pair[1], ks_pair[0], ks_pair[1]
 
 
-def _make_person_name(citizen_no: int) -> Tuple[str, str]:
-    """Sinh tên chuẩn, tên thừa khoảng trắng, tab và tên không dấu."""
-    variants = {
-        0: ("  Nguyễn   Văn  An ", "  NGUYEN   VAN  AN "),
-        1: ("Nguyễn\tVăn An", "NGUYEN\tVAN AN"),
-        2: ("  Trần Thị Bình  ", "  TRAN THI BINH  "),
-        3: ("Đỗ  Minh   Tuấn", "DO  MINH   TUAN"),
-    }
-    if citizen_no % 10 in variants:
-        return variants[citizen_no % 10]
-    return f"Nguyễn Văn Công Dân {citizen_no}", f"NGUYEN VAN CONG DAN {citizen_no}"
+HO_VIETNAM = [
+    "Nguyễn", "Trần", "Lê", "Phạm", "Hoàng", "Huỳnh", "Phan", "Vũ", "Võ", "Đặng",
+    "Bùi", "Đỗ", "Hồ", "Ngô", "Dương", "Lý", "Đào", "Đinh", "Lâm", "Trịnh",
+]
+TEN_DEM_VIETNAM = [
+    "Văn", "Thị", "Minh", "Ngọc", "Hoàng", "Hữu", "Đức", "Thanh", "Quang", "Thu",
+    "Anh", "Gia", "Bảo", "Khánh", "Phương", "Tuấn",
+]
+TEN_VIETNAM = [
+    "An", "Anh", "Bình", "Chi", "Cường", "Dũng", "Dương", "Đạt", "Giang", "Hà",
+    "Hải", "Hạnh", "Hiếu", "Hòa", "Hùng", "Huy", "Hương", "Khanh", "Khoa", "Kiên",
+    "Lan", "Linh", "Long", "Mai", "Minh", "Nam", "Nga", "Ngân", "Nghĩa", "Ngọc",
+    "Nhung", "Phong", "Phúc", "Phương", "Quân", "Quang", "Quyên", "Sơn", "Tâm", "Thắng",
+    "Thảo", "Thịnh", "Thu", "Thủy", "Trang", "Trung", "Tú", "Tuấn", "Tùng", "Vân", "Việt", "Vy",
+]
+PHONE_PREFIXES = ("090", "091", "093", "094", "096", "097", "098", "032", "035", "038", "086", "088")
+
+
+def _strip_accents_upper(text: str) -> str:
+    normalized = unicodedata.normalize("NFD", text.replace("đ", "d").replace("Đ", "D"))
+    no_accents = "".join(ch for ch in normalized if unicodedata.category(ch) != "Mn")
+    return no_accents.upper()
+
+
+def _make_person_name(citizen_no: int, rng: random.Random) -> Tuple[str, str]:
+    """Sinh họ tên tiếng Việt đa dạng, giữ ~4% biến thể khoảng trắng/tab để test chuẩn hóa."""
+    if citizen_no <= 4:
+        fixed = {
+            1: ("  Nguyễn   Văn  An ", "  NGUYEN   VAN  AN "),
+            2: ("Nguyễn\tVăn An", "NGUYEN\tVAN AN"),
+            3: ("  Trần Thị Bình  ", "  TRAN THI BINH  "),
+            4: ("Đỗ  Minh   Tuấn", "DO  MINH   TUAN"),
+        }
+        return fixed[citizen_no]
+
+    ho = rng.choice(HO_VIETNAM)
+    dem = rng.choice(TEN_DEM_VIETNAM)
+    ten = rng.choice(TEN_VIETNAM)
+    full_name = f"{ho} {dem} {ten}"
+    unsigned = _strip_accents_upper(full_name)
+
+    roll = rng.random()
+    if roll < 0.02:
+        return f"  {ho}   {dem}  {ten} ", f"  {_strip_accents_upper(ho)}   {_strip_accents_upper(dem)}  {_strip_accents_upper(ten)} "
+    if roll < 0.04:
+        return f"{ho}\t{dem} {ten}", f"{_strip_accents_upper(ho)}\t{_strip_accents_upper(dem)} {_strip_accents_upper(ten)}"
+    return full_name, unsigned
+
+
+def _make_random_birth_date(rng: random.Random) -> Optional[int]:
+    """Sinh ngày sinh đa dạng (1945-2018), giữ tỷ lệ lỗi ~2.5%."""
+    kind = _weighted_choice(rng, [
+        ("FULL", 0.77),
+        ("YYYY0000", 0.08),
+        ("YYYY", 0.03),
+        ("YYYYMM00", 0.06),
+        ("YYYYMM", 0.035),
+        ("BAD_DAY", 0.008),
+        ("TOO_OLD", 0.005),
+        ("FUTURE", 0.002),
+        ("NULL", 0.01),
+    ])
+    if kind == "NULL":
+        return None
+    if kind == "BAD_DAY":
+        return 19950230
+    if kind == "TOO_OLD":
+        return 17500101
+    if kind == "FUTURE":
+        return 2099
+
+    year = rng.randint(1945, 2018)
+    month = rng.randint(1, 12)
+    day = rng.randint(1, 28)
+    if kind == "FULL":
+        return year * 10000 + month * 100 + day
+    if kind == "YYYY0000":
+        return year * 10000
+    if kind == "YYYY":
+        return year
+    if kind == "YYYYMM00":
+        return year * 10000 + month * 100
+    return year * 100 + month
+
+
+def _make_random_phone(citizen_no: int, rng: random.Random) -> Optional[str]:
+    """Sinh số điện thoại đa dạng tránh lặp lại 1 số cố định."""
+    kind = _weighted_choice(rng, [
+        ("STD10", 0.72),
+        ("PREFIX84", 0.07),
+        ("PREFIX840", 0.015),
+        ("NO_ZERO", 0.07),
+        ("SPACED", 0.08),
+        ("NULL", 0.03),
+        ("SHORT", 0.008),
+        ("ALPHA", 0.007),
+    ])
+    if kind == "NULL":
+        return None
+    if kind == "SHORT":
+        return "12345"
+    if kind == "ALPHA":
+        return "09123ABCDE"
+
+    prefix = rng.choice(PHONE_PREFIXES)
+    tail7 = f"{(citizen_no * 7919 + rng.randint(0, 9999999)) % 10000000:07d}"
+    base10 = f"{prefix}{tail7}"
+    if kind == "STD10":
+        return base10
+    if kind == "PREFIX84":
+        return f"84{base10[1:]}"
+    if kind == "PREFIX840":
+        return f"84{base10}"
+    if kind == "NO_ZERO":
+        return base10[1:]
+    return f"{base10[:4]} {base10[4:7]} {base10[7:]}"
 
 
 def iter_citizen_records(
@@ -338,28 +455,19 @@ def iter_citizen_records(
         birth_date = (
             BIRTH_DATE_CASES[(citizen_no - 1) % len(BIRTH_DATE_CASES)]
             if citizen_no <= len(BIRTH_DATE_CASES)
-            else _weighted_choice(rng, [
-            (19950815, 0.30), (19881120, 0.25), (19950000, 0.10),
-            (1995, 0.03), (19950800, 0.08), (199508, 0.05),
-            (19950230, 0.05), (17500101, 0.02), (None, 0.12),
-        ])
+            else _make_random_birth_date(rng)
         )
         phone = (
             PHONE_CASES[(citizen_no - 1) % len(PHONE_CASES)]
             if citizen_no <= len(PHONE_CASES)
-            else _weighted_choice(rng, [
-            ("0912345678", 0.65), ("84912345678", 0.07),
-            ("840912345678", 0.01), ("912345678", 0.07),
-            ("0912 345 678", 0.08), ("12345", 0.03),
-            ("09123ABCDE", 0.02), (None, 0.07),
-        ])
+            else _make_random_phone(citizen_no, rng)
         )
         nationality = (
             NATIONALITY_CASES[(citizen_no - 1) % len(NATIONALITY_CASES)]
             if citizen_no <= len(NATIONALITY_CASES)
             else rng.choices(
                 ["VN", "233", "LA", "KR", "JP", "CN", "US", "SG", "FR", "XX", None],
-                weights=[0.50, 0.20, 0.05, 0.05, 0.04, 0.04, 0.03, 0.02, 0.01, 0.03, 0.03],
+                weights=[0.60, 0.25, 0.03, 0.03, 0.02, 0.02, 0.02, 0.01, 0.01, 0.005, 0.005],
                 k=1,
             )[0]
         )
@@ -368,7 +476,7 @@ def iter_citizen_records(
             if citizen_no <= len(ETHNICITY_CASES)
             else rng.choices(
                 [1, 2, 3, 4, 5, 6, 7, 8, 9999, None],
-                weights=[0.70, 0.10, 0.06, 0.04, 0.03, 0.02, 0.02, 0.01, 0.01, 0.01],
+                weights=[0.75, 0.09, 0.05, 0.03, 0.02, 0.02, 0.02, 0.01, 0.005, 0.005],
                 k=1,
             )[0]
         )
@@ -377,12 +485,12 @@ def iter_citizen_records(
             doc_case = DOCUMENT_CASES[citizen_no - 1]
         else:
             doc_case = _weighted_choice(rng, [
-                ("CCCD_12", 0.82), ("CMTND_12", 0.06),
-                ("CMND_9", 0.06), ("BOTH_NULL", 0.06),
+                ("CCCD_12", 0.92), ("CMTND_12", 0.05),
+                ("CMND_9", 0.015), ("BOTH_NULL", 0.015),
             ])
         so_cccd, so_cmtnd = _make_document_numbers(citizen_no, doc_case)
         ma_tinh, ma_xa, ma_tinh_lh, ma_xa_lh, ma_tinh_ks, ma_xa_ks = _make_address_values(citizen_no, rng)
-        ho_ten, ho_ten_unsigned = _make_person_name(citizen_no)
+        ho_ten, ho_ten_unsigned = _make_person_name(citizen_no, rng)
 
         for household_idx in range(household_count):
             ma_ho_gd = _make_household_code(citizen_no, household_idx)

@@ -8,13 +8,15 @@ from fastapi import FastAPI, Request
 
 from src.api.db import close_db_pool, ensure_default_dev_api_key, init_db_pool
 from src.api.routers.ca_nhan import router as ca_nhan_router
-from src.api.security import audit_logger, hash_api_key
+from src.api.security import audit_logger, hash_api_key, redact_query_params
+from src.config import APP_ENV
 
 
 @asynccontextmanager
 async def lifespan(_app: FastAPI):
     init_db_pool()
-    ensure_default_dev_api_key(hash_api_key("dev-secret-key"))
+    if APP_ENV == "development":
+        ensure_default_dev_api_key(hash_api_key("dev-secret-key"))
     await audit_logger.start_worker()
     yield
     await audit_logger.stop_worker()
@@ -40,7 +42,7 @@ async def async_audit_log_middleware(request: Request, call_next):
         audit_logger.enqueue({
             "client_name": client_info["client_name"] if client_info else "ANONYMOUS",
             "endpoint": request.url.path,
-            "query_params": str(request.query_params),
+            "query_params": redact_query_params(str(request.query_params)),
             "http_status": response.status_code,
             "response_ms": elapsed_ms,
         })

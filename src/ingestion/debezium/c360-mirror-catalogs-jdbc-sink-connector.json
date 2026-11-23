@@ -1,0 +1,23 @@
+{
+  "name": "c360-mirror-catalogs-jdbc-sink-connector",
+  "config": {
+    "connector.class": "io.debezium.connector.jdbc.JdbcSinkConnector",
+    "tasks.max": "1",
+    "topics": "vss_cdc.VSS.VSS_DM_DANTOC,vss_cdc.VSS.VSS_DM_QUOC_TICH,vss_cdc.VSS.VSS_DM_DBHC",
+    "connection.url": "jdbc:oracle:thin:@//hgd-oracle:1521/FREEPDB1",
+    "connection.username": "C360",
+    "connection.password": "${file:/kafka/connect/secrets.properties:C360_PASSWORD}",
+    "table.name.format": "${topic}",
+    "transforms": "routeMirrorTable",
+    "transforms.routeMirrorTable.type": "org.apache.kafka.connect.transforms.RegexRouter",
+    "transforms.routeMirrorTable.regex": "vss_cdc\\.VSS\\.(.*)",
+    "transforms.routeMirrorTable.replacement": "C360.MIRROR_$1",
+    "insert.mode": "upsert",
+    "delete.enabled": "true",
+    "primary.key.mode": "record_key",
+    "primary.key.fields": "ID",
+    "schema.evolution": "none",
+    "quote.identifiers": "false",
+    "batch.size": "500"
+  }
+}
