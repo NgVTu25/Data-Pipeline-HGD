@@ -17,12 +17,43 @@ from typing import Optional
 
 try:
     from airflow import DAG
-    from airflow.operators.bash import BashOperator
+    from airflow.operators.python import PythonOperator
     HAS_AIRFLOW = True
 except ImportError:
     DAG = None  # type: ignore[assignment]
-    BashOperator = None  # type: ignore[assignment]
+    PythonOperator = None  # type: ignore[assignment]
     HAS_AIRFLOW = False
+
+
+def _exec_near_realtime_batch() -> None:
+    """Thực thi thực tế procedure C360.PKG_C360_SYNC.PRC_RUN_NEAR_REALTIME_BATCH trên Oracle."""
+    import oracledb
+    from src.config import TARGET_DB
+
+    with oracledb.connect(user=TARGET_DB.user, password=TARGET_DB.password, dsn=TARGET_DB.dsn) as conn:
+        with conn.cursor() as cur:
+            cur.execute("BEGIN C360.PKG_C360_SYNC.PRC_RUN_NEAR_REALTIME_BATCH(p_safety_lag_seconds => 2); END;")
+
+
+def _exec_refresh_dbhc_maps() -> None:
+    """Thực thi thực tế procedure C360.PKG_C360_SYNC.PRC_REFRESH_DBHC_MAPS trên Oracle."""
+    import oracledb
+    from src.config import TARGET_DB
+
+    with oracledb.connect(user=TARGET_DB.user, password=TARGET_DB.password, dsn=TARGET_DB.dsn) as conn:
+        with conn.cursor() as cur:
+            cur.execute("BEGIN C360.PKG_C360_SYNC.PRC_REFRESH_DBHC_MAPS; END;")
+
+
+def _exec_reconciliation() -> None:
+    """Chạy đối soát 3 tầng và raise lỗi nếu phát hiện FAIL."""
+    from src.reconciliation.reconcile_pipeline import run_reconciliation
+
+    report = run_reconciliation()
+    logging.getLogger("airflow.task").info("Reconciliation report: %s", report)
+    if report["overall_status"] == "FAIL":
+        raise RuntimeError(f"3-tier reconciliation FAILED: {report}")
+
 
 if HAS_AIRFLOW:
     default_args = {
@@ -30,26 +61,44 @@ if HAS_AIRFLOW:
         "depends_on_past": False,
         "retries": 2,
         "retry_delay": timedelta(seconds=30),
+        "execution_timeout": timedelta(minutes=5),
     }
 
     with DAG(
-        dag_id="c360_daily_map_and_reconcile",
+        dag_id="c360_near_realtime_sync",
         default_args=default_args,
+        description="Đồng bộ Near Real-time mỗi phút từ C360_SYNC_QUEUE sang C360_THONG_TIN_CA_NHAN",
+        schedule="* * * * *",
+        start_date=datetime(2026, 1, 1),
+        catchup=False,
+        max_active_runs=1,
+        tags=["bhxh", "c360", "near_realtime"],
+    ) as dag_near_realtime:
+
+        run_near_realtime_batch = PythonOperator(
+            task_id="run_near_realtime_batch",
+            python_callable=_exec_near_realtime_batch,
+        )
+
+    with DAG(
+        dag_id="c360_daily_map_and_reconcile",
+        default_args={**default_args, "execution_timeout": timedelta(minutes=30)},
         description="Làm mới bảng Map DBHC (Tỉnh/Xã) và chạy đối soát tự động 3 tầng Nguồn <-> Mirror <-> C360",
         schedule="0 2 * * *",
         start_date=datetime(2026, 1, 1),
         catchup=False,
+        max_active_runs=1,
         tags=["bhxh", "c360", "reconciliation"],
-    ) as dag:
+    ) as dag_daily:
 
-        refresh_dbhc_maps = BashOperator(
+        refresh_dbhc_maps = PythonOperator(
             task_id="refresh_dbhc_maps_atomic",
-            bash_command='echo "EXEC C360.PKG_C360_SYNC.PRC_REFRESH_DBHC_MAPS;"',
+            python_callable=_exec_refresh_dbhc_maps,
         )
 
-        run_reconciliation = BashOperator(
+        run_reconciliation = PythonOperator(
             task_id="run_3tier_reconciliation",
-            bash_command="python -m src.reconciliation.reconcile_pipeline",
+            python_callable=_exec_reconciliation,
         )
 
         refresh_dbhc_maps >> run_reconciliation
