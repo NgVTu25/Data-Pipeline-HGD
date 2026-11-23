@@ -7,12 +7,39 @@ import hashlib
 import logging
 import time
 from typing import Dict, Any, List, Optional, Tuple
+from urllib.parse import parse_qsl, urlencode
 from fastapi import Header, HTTPException, Request, status
 
 from src.api.db import fetch_one_dict, get_target_connection
 from src.config import AUDIT_LOG_BATCH_SIZE, AUDIT_LOG_FLUSH_INTERVAL_SEC
 
 logger = logging.getLogger("c360_security")
+
+_SENSITIVE_QUERY_KEYS = {
+    "ho_ten",
+    "ngay_sinh",
+    "ma",
+    "so_dinh_danh",
+    "cccd",
+    "so_cccd",
+    "so_cmtnd",
+    "phone",
+    "sdt",
+}
+
+
+def redact_query_params(raw_query: str) -> str:
+    """Ẩn các tham số định danh cá nhân (PII) trước khi ghi Audit Log."""
+    if not raw_query:
+        return ""
+    pairs = parse_qsl(raw_query, keep_blank_values=True)
+    if not pairs:
+        return raw_query
+    redacted = [
+        (k, "***" if k.lower() in _SENSITIVE_QUERY_KEYS else v)
+        for k, v in pairs
+    ]
+    return urlencode(redacted)
 
 # Cache ngắn hạn (30s) cho API key lookup để giảm tải DB
 _API_KEY_CACHE: Dict[str, Tuple[float, Optional[Dict[str, Any]]]] = {}
@@ -52,15 +79,31 @@ class AsyncBatchAuditLogger:
 
     def __init__(self, batch_size: int = AUDIT_LOG_BATCH_SIZE, flush_interval: float = AUDIT_LOG_FLUSH_INTERVAL_SEC):
         self.queue: asyncio.Queue[Dict[str, Any]] = asyncio.Queue(maxsize=10000)
+        self._buffer: List[Dict[str, Any]] = []
         self.batch_size = batch_size
         self.flush_interval = flush_interval
         self._worker_task: Optional[asyncio.Task] = None
+        self.enqueued_count: int = 0
+        self.dropped_count: int = 0
+        self.flushed_count: int = 0
+        self.failed_batches: int = 0
 
     def enqueue(self, entry: Dict[str, Any]) -> None:
         try:
             self.queue.put_nowait(entry)
+            self.enqueued_count += 1
         except asyncio.QueueFull:
-            pass
+            self.dropped_count += 1
+            logger.warning("Audit log queue full; dropped_count=%d", self.dropped_count)
+
+    def get_metrics(self) -> Dict[str, int]:
+        return {
+            "enqueued": self.enqueued_count,
+            "dropped": self.dropped_count,
+            "flushed": self.flushed_count,
+            "failed_batches": self.failed_batches,
+            "queue_size": self.queue.qsize(),
+        }
 
     async def start_worker(self) -> None:
         self._worker_task = asyncio.create_task(self._flush_loop())
@@ -72,8 +115,9 @@ class AsyncBatchAuditLogger:
                 await self._worker_task
             except asyncio.CancelledError:
                 pass
-        # Flush remaining items on shutdown
-        remaining: List[Dict[str, Any]] = []
+        # Flush remaining items from both _buffer and queue on shutdown
+        remaining: List[Dict[str, Any]] = list(self._buffer)
+        self._buffer.clear()
         while not self.queue.empty():
             try:
                 remaining.append(self.queue.get_nowait())
@@ -83,19 +127,19 @@ class AsyncBatchAuditLogger:
             await self._write_batch_to_db(remaining)
 
     async def _flush_loop(self) -> None:
-        buffer: List[Dict[str, Any]] = []
         last_flush = time.monotonic()
         while True:
             try:
                 timeout = max(0.1, self.flush_interval - (time.monotonic() - last_flush))
                 item = await asyncio.wait_for(self.queue.get(), timeout=timeout)
-                buffer.append(item)
+                self._buffer.append(item)
             except asyncio.TimeoutError:
                 pass
 
-            if buffer and (len(buffer) >= self.batch_size or (time.monotonic() - last_flush) >= self.flush_interval):
-                await self._write_batch_to_db(buffer)
-                buffer.clear()
+            if self._buffer and (len(self._buffer) >= self.batch_size or (time.monotonic() - last_flush) >= self.flush_interval):
+                batch_to_write = list(self._buffer)
+                self._buffer.clear()
+                await self._write_batch_to_db(batch_to_write)
                 last_flush = time.monotonic()
 
     async def _write_batch_to_db(self, batch: List[Dict[str, Any]]) -> None:
@@ -122,10 +166,23 @@ class AsyncBatchAuditLogger:
                     cur.executemany(sql, rows)
                 conn.commit()
 
-        try:
-            await asyncio.to_thread(_sync_insert)
-        except Exception as exc:
-            logger.warning("Failed to flush %d audit log rows: %s", len(batch), exc)
+        max_attempts = 3
+        for attempt in range(1, max_attempts + 1):
+            try:
+                await asyncio.to_thread(_sync_insert)
+                self.flushed_count += len(batch)
+                return
+            except Exception as exc:
+                if attempt < max_attempts:
+                    await asyncio.sleep(0.2 * attempt)
+                else:
+                    self.failed_batches += 1
+                    logger.warning(
+                        "Failed to flush %d audit log rows after %d attempts: %s",
+                        len(batch),
+                        max_attempts,
+                        exc,
+                    )
 
 
 audit_logger = AsyncBatchAuditLogger()
