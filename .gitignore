@@ -34,3 +34,6 @@ airflow/webserver_config.py
 .idea/
 .DS_Store
 Thumbs.db
+
+# Local documentation
+docs/
