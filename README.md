@@ -1,6 +1,6 @@
 # Dự án Data Pipeline Hộ Gia Đình - Nhân Khẩu (HDG -> Mirror -> C360 -> BI & API)
 
-Khung xương chuẩn (Project Skeleton) cho dự án xây dựng Data Pipeline End-to-End trong 4 tuần.
+Khung xương chuẩn (Project Skeleton) cho dự án xây dựng Data Pipeline End-to-End.
 
 ## 1. Kiến trúc tổng thể
 
