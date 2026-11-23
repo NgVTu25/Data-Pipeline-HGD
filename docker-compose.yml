@@ -51,7 +51,7 @@ services:
       start_period: 15s
 
   debezium-connect:
-    image: quay.io/debezium/connect:2.7.3.Final
+    image: quay.io/debezium/connect:3.7.1.Final
     container_name: hgd-debezium-connect
     restart: unless-stopped
     depends_on:

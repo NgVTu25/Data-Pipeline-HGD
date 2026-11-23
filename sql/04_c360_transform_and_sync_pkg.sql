@@ -422,10 +422,10 @@ CREATE OR REPLACE PACKAGE BODY C360.PKG_C360_SYNC AS
             RAISE_APPLICATION_ERROR(-20001, 'Staging validation failed: 0 rows built while Mirror has valid citizens.');
         END IF;
 
-        -- Bước 6: Publish atomic trong 1 transaction (có thể ROLLBACK khôi phục bảng chính nếu lỗi)
-        DELETE FROM C360.C360_THONG_TIN_CA_NHAN;
+        -- Bước 6: Publish nhanh từ bảng Staging đã validate (dùng TRUNCATE + /*+ APPEND */ để tránh tràn UNDO)
+        EXECUTE IMMEDIATE 'TRUNCATE TABLE C360.C360_THONG_TIN_CA_NHAN';
 
-        INSERT INTO C360.C360_THONG_TIN_CA_NHAN (
+        INSERT /*+ APPEND */ INTO C360.C360_THONG_TIN_CA_NHAN (
             MA_SO_BHXH, MA_SO_BHXH_CU, MA_HO_GD, IS_CHU_HO, QH_CHU_HO, TEN_QH_CHU_HO,
             HO_TEN, HO_TEN_KHONG_DAU, GIOI_TINH, NGAY_SINH_CHUAN, NGAY_SINH_GOC,
             SO_DINH_DANH, SO_CCCD_GOC, SO_CMTND_GOC, SO_DIEN_THOAI_CHUAN, SO_DIEN_THOAI_GOC, EMAIL,
