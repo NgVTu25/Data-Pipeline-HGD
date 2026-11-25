@@ -3,7 +3,9 @@ Unit tests kiểm chứng các cải tiến P0, P1, P2 trong Data-Pipeline-HGD.
 Chạy độc lập bằng `python -m unittest tests/test_pipeline_improvements.py -v` (không cần Oracle/Spark chạy thật).
 """
 import asyncio
+import os
 import sys
+import tempfile
 import types
 import unittest
 from pathlib import Path
@@ -207,6 +209,171 @@ class TestPipelineImprovements(unittest.TestCase):
         self.assertEqual(metrics["enqueued"], 2)
         self.assertEqual(metrics["dropped"], 1)
         self.assertEqual(metrics["queue_size"], 2)
+
+    def test_autonomous_db_config_jdbc_url_normalizes_windows_path(self):
+        from src.config import AutonomousDatabaseConfig
+
+        cfg = AutonomousDatabaseConfig(
+            tns_alias="BHXH_TEST_DB_HIGH",
+            user="BHXH_TEST",
+            password="secret",
+            wallet_location=r"D:\OracleCloud\Wallet\BHXH_TEST_DB",
+            schema="VSS",
+            table="VSS_HO_GD_NHANKHAU",
+        )
+        self.assertEqual(
+            cfg.jdbc_url,
+            "jdbc:oracle:thin:@BHXH_TEST_DB_HIGH?TNS_ADMIN=D:/OracleCloud/Wallet/BHXH_TEST_DB",
+        )
+
+    def test_cloud_full_load_query_builder_modes_scn_and_identifier_validation(self):
+        if "pyspark" not in sys.modules:
+            try:
+                import pyspark.sql  # noqa: F401
+            except Exception:
+                pyspark_mod = types.ModuleType("pyspark")
+                pyspark_sql = types.ModuleType("pyspark.sql")
+                pyspark_sql.SparkSession = object
+                sys.modules["pyspark"] = pyspark_mod
+                sys.modules["pyspark.sql"] = pyspark_sql
+
+        from src.ingestion.spark_cloud_full_load import (
+            build_cloud_source_query,
+            validate_identifier,
+        )
+
+        q_hash = build_cloud_source_query(
+            schema="VSS",
+            table="VSS_HO_GD_NHANKHAU",
+            limit=10000,
+            partition_mode="ora_hash",
+            partition_column="MA_CD",
+            num_partitions=2,
+            snapshot_scn=123456789,
+            safe_ma_ho_gd=True,
+        )
+        self.assertIn("AS OF SCN 123456789", q_hash)
+        self.assertIn("WHERE ROWNUM <= 10000", q_hash)
+        self.assertIn("ORA_HASH(t.MA_CD, 1) AS SPARK_PART_ID", q_hash)
+        self.assertIn("MA_HO_GD_SAFE", q_hash)
+
+        q_range = build_cloud_source_query(
+            schema="BHXH_TEST",
+            table="HO_SO",
+            limit=None,
+            partition_mode="range",
+            partition_column="ID",
+            num_partitions=2,
+        )
+        self.assertEqual(q_range, "BHXH_TEST.HO_SO")
+
+        q_none = build_cloud_source_query(
+            schema="VSS",
+            table="VSS_HO_GD_NHANKHAU",
+            limit=500,
+            partition_mode="none",
+            num_partitions=1,
+        )
+        self.assertIn("WHERE ROWNUM <= 500", q_none)
+        self.assertNotIn("ORA_HASH", q_none)
+
+        self.assertEqual(validate_identifier("VSS_HO_GD_NHANKHAU", "table"), "VSS_HO_GD_NHANKHAU")
+        with self.assertRaises(ValueError):
+            validate_identifier("HO_SO; DROP TABLE X", "table")
+
+    def test_cloud_full_load_parameter_validation(self):
+        from src.config import AutonomousDatabaseConfig
+        from src.ingestion import spark_cloud_full_load as cloud_mod
+
+        with tempfile.TemporaryDirectory() as tmp_dir:
+            with open(os.path.join(tmp_dir, "tnsnames.ora"), "w", encoding="utf-8") as fh:
+                fh.write("BHXH_TEST_DB_HIGH = (DESCRIPTION=(ADDRESS=(PROTOCOL=tcps)))")
+
+            valid_cfg = AutonomousDatabaseConfig(
+                tns_alias="BHXH_TEST_DB_HIGH",
+                user="BHXH_TEST",
+                password="pwd",
+                wallet_location=tmp_dir,
+                schema="VSS",
+                table="VSS_HO_GD_NHANKHAU",
+            )
+            with patch.object(cloud_mod, "FULLLOAD_DB", valid_cfg):
+                schema, table, col = cloud_mod.validate_run_params(
+                    limit=1000,
+                    partitions=2,
+                    lower_bound=1,
+                    upper_bound=10000,
+                    partition_mode="ora_hash",
+                    partition_column="MA_CD",
+                )
+                self.assertEqual((schema, table, col), ("VSS", "VSS_HO_GD_NHANKHAU", "MA_CD"))
+
+                with self.assertRaises(ValueError):
+                    cloud_mod.validate_run_params(
+                        limit=None,
+                        partitions=8,
+                        lower_bound=1,
+                        upper_bound=10000,
+                        partition_mode="ora_hash",
+                        partition_column="MA_CD",
+                    )
+
+                with self.assertRaises(ValueError):
+                    cloud_mod.validate_run_params(
+                        limit=None,
+                        partitions=2,
+                        lower_bound=100,
+                        upper_bound=100,
+                        partition_mode="range",
+                        partition_column="ID",
+                    )
+
+            missing_wallet_cfg = AutonomousDatabaseConfig(
+                tns_alias="BHXH_TEST_DB_HIGH",
+                user="BHXH_TEST",
+                password="pwd",
+                wallet_location=os.path.join(tmp_dir, "missing_wallet"),
+                schema="VSS",
+                table="VSS_HO_GD_NHANKHAU",
+            )
+            with patch.object(cloud_mod, "FULLLOAD_DB", missing_wallet_cfg):
+                with self.assertRaises(FileNotFoundError):
+                    cloud_mod.validate_run_params(
+                        limit=None,
+                        partitions=1,
+                        lower_bound=1,
+                        upper_bound=100,
+                        partition_mode="none",
+                        partition_column="MA_CD",
+                    )
+
+    def test_cloud_full_load_reads_wallet_dir_and_resolves_tns_alias(self):
+        from src.ingestion import spark_cloud_full_load as cloud_mod
+
+        tns_content = (
+            "# Oracle Cloud Wallet tnsnames\n"
+            "bhxhtest_medium = (DESCRIPTION=(ADDRESS=(PROTOCOL=tcps)(PORT=1522)))\n"
+            "bhxhtest_high = (DESCRIPTION=(ADDRESS=(PROTOCOL=tcps)(PORT=1522)))\n"
+        )
+        with tempfile.TemporaryDirectory() as tmp_dir:
+            nested_dir = Path(tmp_dir) / "Wallet_BHXHTEST"
+            nested_dir.mkdir()
+            (nested_dir / "tnsnames.ora").write_text(tns_content, encoding="utf-8")
+
+            # Hỗ trợ cả trỏ trực tiếp lẫn thư mục cha lồng 1 cấp
+            wallet_dir = cloud_mod.resolve_wallet_dir(tmp_dir)
+            self.assertEqual(wallet_dir, nested_dir)
+            self.assertTrue((wallet_dir / "tnsnames.ora").is_file())
+
+            # Tự chọn *_high nếu để trống TNS alias
+            self.assertEqual(cloud_mod.resolve_tns_alias(wallet_dir / "tnsnames.ora", ""), "bhxhtest_high")
+            # Khớp không phân biệt hoa thường
+            self.assertEqual(
+                cloud_mod.resolve_tns_alias(wallet_dir / "tnsnames.ora", "BHXHTEST_MEDIUM"),
+                "bhxhtest_medium",
+            )
+            with self.assertRaises(ValueError):
+                cloud_mod.resolve_tns_alias(wallet_dir / "tnsnames.ora", "WRONG_ALIAS")
 
 
 if __name__ == "__main__":

@@ -11,6 +11,22 @@ env/
 # Environment variables & secrets (NEVER commit real credentials)
 .env
 *.env.local
+secrets.properties
+Wallet/
+wallet/
+Wallet_*.zip
+wallet_*.zip
+*.sso
+*.p12
+*.jks
+*.pem
+tnsnames.ora
+sqlnet.ora
+ojdbc.properties
+
+# Local JDBC drivers & binaries
+drivers/*.jar
+drivers/hadoop/
 
 # Data, logs, and temporary outputs (Requirement 5.2: No heavy data or junk files in Git)
 data/
@@ -37,3 +53,4 @@ Thumbs.db
 
 # Local documentation
 docs/
+!docs/06_Huong_Dan_Hybrid_Cloud_Local.md

@@ -18,6 +18,7 @@ services:
     environment:
       ZOOKEEPER_CLIENT_PORT: 2181
       ZOOKEEPER_TICK_TIME: 2000
+      KAFKA_HEAP_OPTS: ${ZK_HEAP_OPTS:--Xmx256m -Xms128m}
     ports:
       - "2181:2181"
     healthcheck:
@@ -43,6 +44,7 @@ services:
       KAFKA_LISTENER_SECURITY_PROTOCOL_MAP: PLAINTEXT:PLAINTEXT,PLAINTEXT_INTERNAL:PLAINTEXT
       KAFKA_INTER_BROKER_LISTENER_NAME: PLAINTEXT_INTERNAL
       KAFKA_OFFSETS_TOPIC_REPLICATION_FACTOR: 1
+      KAFKA_HEAP_OPTS: ${KAFKA_HEAP_OPTS:--Xmx512m -Xms256m}
     healthcheck:
       test: ["CMD-SHELL", "kafka-broker-api-versions --bootstrap-server localhost:9092 > /dev/null 2>&1"]
       interval: 10s
@@ -67,6 +69,7 @@ services:
       STATUS_STORAGE_TOPIC: my_connect_statuses
       CONFIG_PROVIDERS: file
       CONFIG_PROVIDERS_FILE_CLASS: org.apache.kafka.common.config.provider.FileConfigProvider
+      HEAP_OPTS: ${CONNECT_HEAP_OPTS:--Xmx512m -Xms256m}
     healthcheck:
       test: ["CMD-SHELL", "curl -sf http://localhost:8083/connectors || exit 1"]
       interval: 10s
@@ -76,6 +79,7 @@ services:
     volumes:
       - ./drivers/ojdbc11.jar:/kafka/connect/debezium-connector-oracle/ojdbc11.jar:ro
       - ./drivers/ojdbc11.jar:/kafka/connect/debezium-connector-jdbc/ojdbc11.jar:ro
+      - ./secrets.properties:/kafka/connect/secrets.properties:ro
 
 volumes:
   oracle_data:

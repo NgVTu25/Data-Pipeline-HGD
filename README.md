@@ -27,27 +27,33 @@ Khung xương chuẩn (Project Skeleton) cho dự án xây dựng Data Pipeline 
 ```text
 BHXH-HS/
 ├── .env.example                      # Mẫu biến môi trường (copy sang .env khi chạy)
-├── .gitignore                        # Chặn commit file rác, dữ liệu nặng, .env
-├── docker-compose.yml                # Hạ tầng Kafka & Debezium Connect
+├── .gitignore                        # Chặn commit file rác, dữ liệu nặng, .env, Wallet, JARs
+├── secrets.properties.example        # Mẫu mật khẩu Kafka Connect FileConfigProvider
+├── docker-compose.yml                # Hạ tầng Oracle Local, Kafka & Debezium Connect
 ├── requirements.txt                  # Thư viện Python cần thiết
-├── docs/                             # Tài liệu thiết kế & QA
+├── docs/                             # Tài liệu thiết kế, QA & Runbook
 │   ├── 01_Basic_Design.md            # Thiết kế tổng thể & giải pháp kỹ thuật cốt lõi
 │   ├── 02_Detail_Design.md           # Thiết kế chi tiết bảng, luật chuẩn hóa, API
-│   └── 03_QA_Checklist.md            # Danh sách câu hỏi nghiệp vụ & kỹ thuật cần chốt
+│   ├── 03_QA_Checklist.md            # Danh sách câu hỏi nghiệp vụ & kỹ thuật cần chốt
+│   ├── 04_Huong_Dan_Chay_Pipeline.md # Hướng dẫn vận hành End-to-End
+│   ├── 05_Runbook_Khoi_Dong_Cac_Giai_Doan.md
+│   └── 06_Huong_Dan_Hybrid_Cloud_Local.md # Hướng dẫn nhánh Hybrid Cloud Full Load + Local CDC
 ├── sql/                              # Toàn bộ script DDL, PL/SQL ETL và View BI
 │   ├── 01_source_ddl.sql             # DDL 4 bảng nguồn hệ thống VSS
-│   ├── 02_mirror_ddl.sql             # DDL bảng vùng Mirror & Unique Index
+│   ├── 02_mirror_ddl.sql             # DDL bảng vùng Mirror
+│   ├── 02b_mirror_post_load_indexes.sql # Unique Index vùng Mirror dựng sau Full Load
 │   ├── 03_c360_ddl_and_control.sql   # DDL bảng Map, C360, Queue, Control, Trigger, API Auth
-│   ├── 04_c360_etl_package.sql       # Package PL/SQL dùng chung logic Full Load & Near RT
+│   ├── 04_c360_transform_and_sync_pkg.sql # View chuẩn hóa & Package PL/SQL Full Load / Near RT
 │   └── 05_bi_datamart_views.sql      # Hệ thống View phục vụ 3 nhóm Dashboard BI
 ├── src/                              # Mã nguồn Python
-│   ├── config.py                     # Quản lý cấu hình tập trung từ .env
+│   ├── config.py                     # Quản lý cấu hình tập trung từ .env (Local + Cloud Full Load)
 │   ├── data_generator/               # Phần 1.1: Sinh dữ liệu giả lập & biến động CDC
 │   │   ├── seed_initial_data.py      # Script 1: Sinh dữ liệu ban đầu + cài cắm lỗi
 │   │   └── simulate_cdc_changes.py   # Script 2: Giả lập INSERT / UPDATE / DELETE / Đổi MA_CD
-│   ├── ingestion/                    # Phần 1.2 & 1.3: Đồng bộ Nguồn -> Mirror
-│   │   ├── spark_full_load.py        # Job PySpark đọc song song theo MA_CD, chống OOM
-│   │   └── debezium/                 # Cấu hình Kafka Connect Source & Sink
+│   ├── ingestion/                    # Phần 1.2 & 1.3: Đồng bộ Nguồn -> Mirror / Cloud -> Parquet
+│   │   ├── spark_full_load.py        # Job PySpark Local VSS -> Mirror theo MA_CD & SCN
+│   │   ├── spark_cloud_full_load.py  # Job PySpark Oracle Cloud Autonomous DB -> Parquet local
+│   │   └── debezium/                 # Cấu hình Kafka Connect Source/Sink & script reset offset
 │   ├── reconciliation/               # Phần 3.1: Đối soát dữ liệu 3 tầng
 │   │   └── reconcile_pipeline.py     # Script kiểm tra lệch Nguồn <-> Mirror <-> C360
 │   └── api/                          # Phần 3.3: REST API Tra cứu C360 (FastAPI)
@@ -55,6 +61,8 @@ BHXH-HS/
 │       ├── security.py               # Xác thực X-API-Key (SHA-256) & Async Batch Audit Log
 │       └── routers/
 │           └── ca_nhan.py            # 4 API tra cứu cá nhân, tra cứu lô, tìm kiếm, thay đổi
+├── tests/                            # Unit tests kiểm chứng độc lập
+│   └── test_pipeline_improvements.py
 └── airflow/                          # Phần 4: Lập lịch tự động hóa
     └── dags/
         └── dag_hgd_c360_pipeline.py  # Airflow DAG điều phối toàn trình
