@@ -251,9 +251,10 @@ class TestPipelineImprovements(unittest.TestCase):
             num_partitions=2,
             snapshot_scn=123456789,
             safe_ma_ho_gd=True,
+            where_clause="MA_CD > '1003000000'",
         )
         self.assertIn("AS OF SCN 123456789", q_hash)
-        self.assertIn("WHERE ROWNUM <= 10000", q_hash)
+        self.assertIn("WHERE (MA_CD > '1003000000') AND ROWNUM <= 10000", q_hash)
         self.assertIn("ORA_HASH(t.MA_CD, 1) AS SPARK_PART_ID", q_hash)
         self.assertIn("MA_HO_GD_SAFE", q_hash)
 

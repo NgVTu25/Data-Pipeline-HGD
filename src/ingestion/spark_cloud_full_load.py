@@ -191,6 +191,7 @@ def build_cloud_source_query(
     num_partitions: int = 1,
     snapshot_scn: Optional[int] = None,
     safe_ma_ho_gd: bool = False,
+    where_clause: Optional[str] = None,
 ) -> str:
     """
     Tạo biểu thức dbtable cho Spark JDBC đọc từ Oracle Cloud.
@@ -212,11 +213,17 @@ def build_cloud_source_query(
 
     qualified_table = f"{safe_schema}.{safe_table}"
     scn_clause = f" AS OF SCN {int(snapshot_scn)}" if snapshot_scn is not None else ""
-    base_from = (
-        f"(SELECT * FROM {qualified_table}{scn_clause} WHERE ROWNUM <= {int(limit)})"
-        if limit is not None
-        else f"{qualified_table}{scn_clause}"
-    )
+    filters: list[str] = []
+    if where_clause and where_clause.strip():
+        filters.append(f"({where_clause.strip()})")
+    if limit is not None:
+        filters.append(f"ROWNUM <= {int(limit)}")
+
+    if filters:
+        where_sql = " AND ".join(filters)
+        base_from = f"(SELECT * FROM {qualified_table}{scn_clause} WHERE {where_sql})"
+    else:
+        base_from = f"{qualified_table}{scn_clause}"
 
     extra_cols: list[str] = []
     if safe_ma_ho_gd:
@@ -229,7 +236,7 @@ def build_cloud_source_query(
     if mode == "range" and num_partitions > 1:
         validate_identifier(partition_column, "partition_column")
 
-    if not extra_cols and limit is None and snapshot_scn is None:
+    if not extra_cols and not filters and snapshot_scn is None:
         return qualified_table
 
     select_cols = ", ".join(["t.*", *extra_cols])
@@ -332,6 +339,8 @@ def run_full_load(
     tns_alias: Optional[str] = None,
     target: str = "parquet",
     skip_catalogs: bool = False,
+    append_mode: bool = False,
+    where_clause: Optional[str] = None,
 ) -> dict[str, Any]:
     """Đọc 1 lượt từ Oracle Cloud Autonomous DB và ghi ra Parquet local hoặc Oracle Local Mirror."""
     mode = (partition_mode or "none").strip().lower()
@@ -368,6 +377,7 @@ def run_full_load(
         num_partitions=partitions,
         snapshot_scn=snapshot_scn,
         safe_ma_ho_gd=safe_ma_ho_gd,
+        where_clause=where_clause,
     )
     use_vss_schema = apply_vss_schema or table.upper() == "VSS_HO_GD_NHANKHAU"
 
@@ -423,19 +433,20 @@ def run_full_load(
 
         if target_mode == "mirror":
             target_table = f"{TARGET_DB.schema}.MIRROR_{table.upper()}"
-            (
+            writer = (
                 df.write.format("jdbc")
                 .option("driver", ORACLE_JDBC_DRIVER)
                 .option("url", TARGET_DB.jdbc_url)
                 .option("user", TARGET_DB.user)
                 .option("password", TARGET_DB.password)
                 .option("dbtable", target_table)
-                .option("truncate", "true")
                 .option("batchsize", str(FULLLOAD_FETCH_SIZE))
                 .option("isolationLevel", "NONE")
-                .mode("overwrite")
-                .save()
             )
+            if append_mode:
+                writer.mode("append").save()
+            else:
+                writer.option("truncate", "true").mode("overwrite").save()
             elapsed = time.perf_counter() - started
             import oracledb
             with oracledb.connect(
@@ -537,6 +548,16 @@ def main() -> None:
         action="store_true",
         help="Khi --target mirror: bỏ qua nạp 3 bảng danh mục.",
     )
+    parser.add_argument(
+        "--append",
+        action="store_true",
+        help="Khi --target mirror: ghi nối tiếp (mode append) thay vì truncate/overwrite.",
+    )
+    parser.add_argument(
+        "--where",
+        default=None,
+        help="Điều kiện WHERE bổ sung khi đọc nguồn Cloud (ví dụ: \"MA_CD > '1003000000'\").",
+    )
     parser.add_argument("--output", default=None, help="Thư mục Parquet đầu ra (khi --target parquet).")
     args = parser.parse_args()
 
@@ -558,6 +579,8 @@ def main() -> None:
         tns_alias=args.tns_alias,
         target=args.target,
         skip_catalogs=args.skip_catalogs,
+        append_mode=args.append,
+        where_clause=args.where,
     )
 
 
