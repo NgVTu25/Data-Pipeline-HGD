@@ -118,7 +118,101 @@ RECONCILIATION_QUERIES: Dict[str, str] = {
             NVL(SUM(CASE WHEN IS_CLEAN = 0 THEN 1 ELSE 0 END), 0) AS DIRTY_ROWS
         FROM C360.C360_THONG_TIN_CA_NHAN
     """,
+    "CHECK_MIRROR_VS_C360_FIELD_FIDELITY": """
+        WITH PENDING_Q AS (
+            SELECT DISTINCT MA_CD FROM C360.C360_SYNC_QUEUE
+        ),
+        MIRROR_LATEST AS (
+            SELECT
+                m.*,
+                ROW_NUMBER() OVER (
+                    PARTITION BY m.MA_CD
+                    ORDER BY m.MODIFY_DATE DESC NULLS LAST, m.CREATED_DATE DESC NULLS LAST, m.ID DESC NULLS LAST
+                ) AS RN
+            FROM C360.MIRROR_VSS_HO_GD_NHANKHAU m
+            WHERE NVL(m.TYPEID, 'ZZ') NOT IN ('GT', 'GM', 'GG', 'GK')
+              AND NVL(m.TRANG_THAI_DUYET, 0) NOT IN (1, 3, 4)
+              AND NOT EXISTS (SELECT 1 FROM PENDING_Q q WHERE q.MA_CD = m.MA_CD)
+        )
+        SELECT
+            COUNT(*) AS TOTAL_COMPARED,
+            NVL(SUM(CASE WHEN
+                NVL(TRIM(m.MA_HO_GD), '~') <> NVL(TRIM(c.MA_HO_GD), '~')
+                OR NVL(REGEXP_REPLACE(TRIM(m.HO_TEN), '\\s+', ' '), '~') <> NVL(TRIM(c.HO_TEN), '~')
+                OR NVL(m.GIOI_TINH, '~') <> NVL(c.GIOI_TINH, '~')
+                OR NVL(m.NGAY_SINH, -1) <> NVL(c.NGAY_SINH_GOC, -1)
+                OR NVL(TRIM(m.SO_CCCD), '~') <> NVL(TRIM(c.SO_CCCD_GOC), '~')
+                OR NVL(TRIM(m.SO_CMTND), '~') <> NVL(TRIM(c.SO_CMTND_GOC), '~')
+                OR NVL(TRIM(m.PHONE_NUMBER), '~') <> NVL(TRIM(c.SO_DIEN_THOAI_GOC), '~')
+                OR NVL(m.IS_ALIVE, '~') <> NVL(c.IS_ALIVE, '~')
+                OR NVL(m.DEAD_DATE, -1) <> NVL(c.DEAD_DATE, -1)
+                OR NVL(TRIM(m.MA_TINH), '~') <> NVL(TRIM(c.MA_TINH_GOC), '~')
+                OR NVL(TRIM(m.MA_XA), '~') <> NVL(TRIM(c.MA_XA_GOC), '~')
+            THEN 1 ELSE 0 END), 0) AS MISMATCH_CONTENT_COUNT
+        FROM MIRROR_LATEST m
+        JOIN C360.C360_THONG_TIN_CA_NHAN c ON m.MA_CD = c.MA_SO_BHXH
+        WHERE m.RN = 1
+    """,
 }
+
+
+def build_source_mirror_checksum_sql(schema_table: str) -> str:
+    """Tạo SQL tính fingerprint nội dung các cột nghiệp vụ chính để đối soát Source <-> Mirror."""
+    return f"""
+        SELECT
+            COUNT(DISTINCT MA_CD) AS DISTINCT_MACD_CNT,
+            TO_CHAR(MAX(MODIFY_DATE), 'YYYY-MM-DD HH24:MI:SS') AS MAX_MODIFY_DATE,
+            NVL(SUM(ORA_HASH(
+                NVL(TRIM(MA_CD), '~') || '|' ||
+                CASE WHEN MA_HO_GD IS NULL OR MA_HO_GD LIKE 'UNKNOWN%' THEN 'UNKNOWN' ELSE TRIM(MA_HO_GD) END || '|' ||
+                NVL(TRIM(HO_TEN), '~') || '|' ||
+                NVL(TO_CHAR(NGAY_SINH), '~') || '|' ||
+                NVL(TRIM(SO_CCCD), '~') || '|' ||
+                NVL(TRIM(MA_TINH), '~') || '|' ||
+                NVL(TRIM(MA_XA), '~') || '|' ||
+                NVL(TRIM(TYPEID), '~') || '|' ||
+                NVL(TO_CHAR(TRANG_THAI_DUYET), '~')
+            )), 0) AS CONTENT_CHECKSUM
+        FROM {schema_table}
+    """
+
+
+def evaluate_source_mirror_checksum(
+    source_stats: Dict[str, Any],
+    mirror_stats: Dict[str, Any],
+    in_flight_q: int = 0,
+) -> Dict[str, Any]:
+    """Đánh giá khớp nội dung Source <-> Mirror qua distinct MA_CD, MAX(MODIFY_DATE) và content checksum."""
+    matched = (
+        source_stats["distinct_macd_cnt"] == mirror_stats["distinct_macd_cnt"]
+        and source_stats["max_modify_date"] == mirror_stats["max_modify_date"]
+        and source_stats["content_checksum"] == mirror_stats["content_checksum"]
+    )
+    if matched:
+        status = "PASS"
+    elif in_flight_q > 0:
+        status = "IN_PROGRESS"
+    else:
+        status = "FAIL"
+    return {
+        "source_distinct_macd": source_stats["distinct_macd_cnt"],
+        "mirror_distinct_macd": mirror_stats["distinct_macd_cnt"],
+        "source_max_modify_date": source_stats["max_modify_date"],
+        "mirror_max_modify_date": mirror_stats["max_modify_date"],
+        "source_content_checksum": source_stats["content_checksum"],
+        "mirror_content_checksum": mirror_stats["content_checksum"],
+        "status": status,
+    }
+
+
+def _fetch_checksum_stats(cur: Any, schema_table: str) -> Dict[str, Any]:
+    cur.execute(build_source_mirror_checksum_sql(schema_table))
+    row = cur.fetchone()
+    return {
+        "distinct_macd_cnt": int(row[0] or 0),
+        "max_modify_date": str(row[1]) if row[1] is not None else None,
+        "content_checksum": int(row[2] or 0),
+    }
 
 
 def run_reconciliation() -> Dict[str, Any]:
@@ -135,6 +229,7 @@ def run_reconciliation() -> Dict[str, Any]:
                 GROUP BY NVL(TRIM(MA_TINH), 'NULL')
             """)
             src_province_counts = {str(r[0]): int(r[1]) for r in cur.fetchall()}
+            src_checksum_stats = _fetch_checksum_stats(cur, f"{SOURCE_DB.schema}.VSS_HO_GD_NHANKHAU")
 
     with oracledb.connect(user=TARGET_DB.user, password=TARGET_DB.password, dsn=TARGET_DB.dsn) as tgt_conn:
         with tgt_conn.cursor() as cur:
@@ -147,6 +242,9 @@ def run_reconciliation() -> Dict[str, Any]:
                 GROUP BY NVL(TRIM(MA_TINH), 'NULL')
             """)
             mirror_province_counts = {str(r[0]): int(r[1]) for r in cur.fetchall()}
+            mirror_checksum_stats = _fetch_checksum_stats(
+                cur, f"{TARGET_DB.schema}.MIRROR_VSS_HO_GD_NHANKHAU"
+            )
             cur.execute("SELECT COUNT(DISTINCT MA_CD) FROM C360.C360_SYNC_QUEUE")
             in_flight_q = int(cur.fetchone()[0])
 
@@ -165,6 +263,10 @@ def run_reconciliation() -> Dict[str, Any]:
                 "in_flight_queue_macds": in_flight_q,
                 "status": src_mirror_status,
             }
+
+            report["checks"]["CHECK_SOURCE_VS_MIRROR_CONTENT_CHECKSUM"] = evaluate_source_mirror_checksum(
+                src_checksum_stats, mirror_checksum_stats, in_flight_q=in_flight_q
+            )
 
             all_provinces = sorted(set(src_province_counts) | set(mirror_province_counts))
             mismatched_provinces = []
@@ -202,6 +304,8 @@ def run_reconciliation() -> Dict[str, Any]:
                     data["status"] = "PASS" if data.get("mismatch_latest_count", 0) == 0 else "FAIL"
                 elif name == "CHECK_ZERO_INVALID_OR_ORPHAN_ON_C360":
                     data["status"] = "PASS" if data.get("orphan_or_invalid_count", 0) == 0 else "FAIL"
+                elif name == "CHECK_MIRROR_VS_C360_FIELD_FIDELITY":
+                    data["status"] = "PASS" if data.get("mismatch_content_count", 0) == 0 else "FAIL"
                 elif name == "SUMMARY_DQ_FLAGS":
                     total = max(1, data.get("total_c360_rows", 0))
                     data["clean_pct"] = round(data.get("clean_rows", 0) * 100.0 / total, 2)

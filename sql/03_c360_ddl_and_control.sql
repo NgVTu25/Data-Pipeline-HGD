@@ -222,6 +222,27 @@ INSERT INTO C360.C360_SYNC_CONTROL (PIPELINE_NAME, IS_PAUSED_FOR_FULL, RUNNING_M
 VALUES ('C360_CITIZEN_PIPELINE', 0, 'IDLE');
 COMMIT;
 
+-- Bảng điều khiển Cutover & Checkpoint giữa Full Load (SCN) và Debezium CDC (Kafka)
+-- Giúp khi chạy lại hệ thống biết chính xác phải tiếp tục từ đâu (Resume), không chạy lại tùy tiện
+CREATE TABLE C360.C360_CDC_CUTOVER_CONTROL (
+    PIPELINE_NAME       VARCHAR2(50 BYTE) PRIMARY KEY,
+    SNAPSHOT_SCN        NUMBER,                                               -- SCN của Full Load (AS OF SCN)
+    CDC_START_SCN       NUMBER,                                               -- SCN bắt đầu CDC
+    CDC_LAST_SCN        NUMBER,                                               -- SCN đã xử lý gần nhất
+    KAFKA_TOPIC         VARCHAR2(200 BYTE) DEFAULT 'vss_cdc.VSS.VSS_HO_GD_NHANKHAU',
+    CONNECTOR_STATUS    VARCHAR2(30 BYTE) DEFAULT 'NOT_STARTED',              -- 'NOT_STARTED', 'RUNNING', 'PAUSED', 'FAILED'
+    CUTOVER_STATUS      VARCHAR2(30 BYTE) DEFAULT 'INIT',                     -- 'INIT', 'FULL_LOAD_RUNNING', 'FULL_LOAD_DONE', 'CDC_ACTIVE', 'FAILED'
+    ERROR_MESSAGE       VARCHAR2(2000 BYTE),
+    UPDATED_AT          TIMESTAMP DEFAULT SYSTIMESTAMP
+);
+
+INSERT INTO C360.C360_CDC_CUTOVER_CONTROL (
+    PIPELINE_NAME, KAFKA_TOPIC, CONNECTOR_STATUS, CUTOVER_STATUS
+) VALUES (
+    'C360_CITIZEN_PIPELINE', 'vss_cdc.VSS.VSS_HO_GD_NHANKHAU', 'NOT_STARTED', 'INIT'
+);
+COMMIT;
+
 CREATE TABLE C360.C360_SYNC_LOG (
     BATCH_ID            NUMBER GENERATED ALWAYS AS IDENTITY PRIMARY KEY,
     RUN_MODE            VARCHAR2(20 BYTE) NOT NULL,         -- 'FULL_LOAD' / 'NEAR_RT'

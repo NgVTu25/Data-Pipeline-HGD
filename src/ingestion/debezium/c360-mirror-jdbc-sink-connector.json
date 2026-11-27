@@ -1,4 +1,4 @@
-﻿{
+{
   "name": "c360-mirror-jdbc-sink-connector",
   "config": {
     "connector.class": "io.debezium.connector.jdbc.JdbcSinkConnector",
@@ -14,6 +14,14 @@
     "primary.key.fields": "MA_CD,MA_HO_GD",
     "schema.evolution": "none",
     "quote.identifiers": "false",
-    "batch.size": "3000"
+    "batch.size": "3000",
+    "max.retries": "5",
+    "retry.backoff.ms": "3000",
+    "errors.tolerance": "all",
+    "errors.deadletterqueue.topic.name": "dlq.c360.mirror.vss_ho_gd_nhankhau",
+    "errors.deadletterqueue.topic.replication.factor": "1",
+    "errors.deadletterqueue.context.headers.enable": "true",
+    "errors.log.enable": "true",
+    "errors.log.include.messages": "true"
   }
 }
