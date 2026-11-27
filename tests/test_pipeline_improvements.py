@@ -376,6 +376,118 @@ class TestPipelineImprovements(unittest.TestCase):
             with self.assertRaises(ValueError):
                 cloud_mod.resolve_tns_alias(wallet_dir / "tnsnames.ora", "WRONG_ALIAS")
 
+    def test_cutover_control_determine_resume_action(self):
+        from src.ingestion.cutover_control import CutoverState, determine_resume_action
+
+        self.assertEqual(determine_resume_action(None)["action"], "RUN_FULL_LOAD")
+        self.assertFalse(determine_resume_action(CutoverState(cutover_status="INIT"))["skip_full_load"])
+
+        done_state = CutoverState(
+            snapshot_scn=100050,
+            cdc_start_scn=100050,
+            connector_status="NOT_STARTED",
+            cutover_status="FULL_LOAD_DONE",
+        )
+        plan_done = determine_resume_action(done_state)
+        self.assertEqual(plan_done["action"], "RESUME_CDC_FROM_SNAPSHOT_SCN")
+        self.assertTrue(plan_done["skip_full_load"])
+        self.assertEqual(plan_done["resume_scn"], 100050)
+
+        paused_cdc = CutoverState(
+            snapshot_scn=100050,
+            cdc_start_scn=100050,
+            cdc_last_scn=100999,
+            connector_status="PAUSED",
+            cutover_status="CDC_ACTIVE",
+        )
+        plan_paused = determine_resume_action(paused_cdc)
+        self.assertEqual(plan_paused["action"], "RESUME_CDC_FROM_LAST_SCN")
+        self.assertEqual(plan_paused["resume_scn"], 100999)
+
+        running_cdc = CutoverState(
+            snapshot_scn=100050,
+            cdc_start_scn=100050,
+            cdc_last_scn=101200,
+            connector_status="RUNNING",
+            cutover_status="CDC_ACTIVE",
+        )
+        self.assertEqual(determine_resume_action(running_cdc)["action"], "MONITOR_RUNNING_CDC")
+
+    def test_monitoring_distinguishes_four_delivery_states_without_concluding_lag_is_loss(self):
+        from src.monitoring.pipeline_monitor import classify_pipeline_delivery_state
+
+        # 1. Message chưa được Kafka Consumer đọc
+        case1 = classify_pipeline_delivery_state({
+            "kafka": {"consumer_lag": 42},
+            "jdbc_sink": {"records_consumed": 100, "records_written": 100, "dlq_messages": 0, "task_state": "RUNNING"},
+            "oracle_mirror": {"c360_pending_queue_count": 0},
+        })
+        self.assertEqual(case1["primary_state"], "UNCONSUMED_IN_KAFKA")
+        self.assertFalse(case1["lag_implies_data_loss"])
+        self.assertFalse(case1["possible_data_loss"])
+
+        # 2. Message đã đọc nhưng Sink chưa ghi
+        case2 = classify_pipeline_delivery_state({
+            "kafka": {"consumer_lag": 0},
+            "jdbc_sink": {"records_consumed": 120, "records_written": 100, "dlq_messages": 0, "task_state": "RUNNING"},
+            "oracle_mirror": {"c360_pending_queue_count": 0},
+        })
+        self.assertEqual(case2["primary_state"], "CONSUMED_NOT_WRITTEN_BY_SINK")
+
+        # 3. Message ghi lỗi và được đưa vào DLQ
+        case3 = classify_pipeline_delivery_state({
+            "kafka": {"consumer_lag": 0},
+            "jdbc_sink": {"records_consumed": 120, "records_written": 117, "dlq_messages": 3, "task_state": "RUNNING"},
+            "oracle_mirror": {"c360_pending_queue_count": 0},
+        })
+        self.assertEqual(case3["primary_state"], "ROUTED_TO_DLQ")
+        self.assertTrue(case3["possible_data_loss"])
+
+        # 4. Message đã ghi thành công vào Mirror nhưng chưa được tầng C360 xử lý
+        case4 = classify_pipeline_delivery_state({
+            "kafka": {"consumer_lag": 0},
+            "jdbc_sink": {"records_consumed": 120, "records_written": 120, "dlq_messages": 0, "task_state": "RUNNING"},
+            "oracle_mirror": {"c360_pending_queue_count": 15},
+        })
+        self.assertEqual(case4["primary_state"], "WRITTEN_TO_MIRROR_PENDING_C360")
+
+        # Healthy
+        healthy = classify_pipeline_delivery_state({
+            "kafka": {"consumer_lag": 0},
+            "jdbc_sink": {"records_consumed": 120, "records_written": 120, "dlq_messages": 0, "task_state": "RUNNING"},
+            "oracle_mirror": {"c360_pending_queue_count": 0},
+        })
+        self.assertEqual(healthy["primary_state"], "HEALTHY_SYNCED")
+
+    def test_jdbc_sink_config_has_dlq_and_retries(self):
+        import json
+
+        sink_path = ROOT_DIR / "src" / "ingestion" / "debezium" / "c360-mirror-jdbc-sink-connector.json"
+        cfg = json.loads(sink_path.read_text(encoding="utf-8"))["config"]
+        self.assertEqual(cfg["errors.tolerance"], "all")
+        self.assertEqual(cfg["errors.deadletterqueue.topic.name"], "dlq.c360.mirror.vss_ho_gd_nhankhau")
+        self.assertEqual(cfg["errors.deadletterqueue.context.headers.enable"], "true")
+        self.assertEqual(cfg["max.retries"], "5")
+
+    def test_reconciliation_content_fidelity_and_checksum(self):
+        from src.reconciliation.reconcile_pipeline import (
+            RECONCILIATION_QUERIES,
+            evaluate_source_mirror_checksum,
+        )
+
+        fidelity_sql = RECONCILIATION_QUERIES["CHECK_MIRROR_VS_C360_FIELD_FIDELITY"]
+        self.assertIn("MISMATCH_CONTENT_COUNT", fidelity_sql)
+        self.assertIn("SO_CCCD_GOC", fidelity_sql)
+        self.assertIn("NGAY_SINH_GOC", fidelity_sql)
+
+        src = {"distinct_macd_cnt": 50000, "max_modify_date": "2026-11-27 10:00:00", "content_checksum": 987654321}
+        mir_ok = {"distinct_macd_cnt": 50000, "max_modify_date": "2026-11-27 10:00:00", "content_checksum": 987654321}
+        mir_bad = {"distinct_macd_cnt": 50000, "max_modify_date": "2026-11-27 10:00:00", "content_checksum": 111111111}
+
+        self.assertEqual(evaluate_source_mirror_checksum(src, mir_ok, in_flight_q=0)["status"], "PASS")
+        self.assertEqual(evaluate_source_mirror_checksum(src, mir_bad, in_flight_q=0)["status"], "FAIL")
+        self.assertEqual(evaluate_source_mirror_checksum(src, mir_bad, in_flight_q=2)["status"], "IN_PROGRESS")
+
 
 if __name__ == "__main__":
     unittest.main()
