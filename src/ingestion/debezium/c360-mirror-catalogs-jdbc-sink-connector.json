@@ -18,6 +18,14 @@
     "primary.key.fields": "ID",
     "schema.evolution": "none",
     "quote.identifiers": "false",
-    "batch.size": "500"
+    "batch.size": "500",
+    "max.retries": "5",
+    "retry.backoff.ms": "3000",
+    "errors.tolerance": "all",
+    "errors.deadletterqueue.topic.name": "dlq.c360.mirror.catalogs",
+    "errors.deadletterqueue.topic.replication.factor": "1",
+    "errors.deadletterqueue.context.headers.enable": "true",
+    "errors.log.enable": "true",
+    "errors.log.include.messages": "true"
   }
 }
