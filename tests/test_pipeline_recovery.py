@@ -108,6 +108,25 @@ class TestPipelineRecovery(unittest.TestCase):
         with self.assertRaises(ValueError):
             retry_failed_queue(MagicMock())
 
+    def test_reclaim_stale_sync_logs_marks_hung_batches_failed(self):
+        from src.recovery.pipeline_recovery import reclaim_stale_sync_logs
+
+        mock_cur = MagicMock()
+        mock_cur.rowcount = 2
+        mock_conn = MagicMock()
+        mock_conn.cursor.return_value.__enter__.return_value = mock_cur
+
+        affected = reclaim_stale_sync_logs(mock_conn, stale_minutes=2)
+        self.assertEqual(affected, 2)
+        executed_sql = mock_cur.execute.call_args_list[0][0][0]
+        self.assertIn("UPDATE C360.C360_SYNC_LOG", executed_sql)
+        self.assertIn("HEARTBEAT_AT", executed_sql)
+        self.assertIn("CLAIMED_BATCH_ID", executed_sql)
+        self.assertIn("SET l.STATUS = 'FAILED'", executed_sql)
+
+        with self.assertRaises(ValueError):
+            reclaim_stale_sync_logs(mock_conn, stale_minutes=0)
+
 
 if __name__ == "__main__":
     unittest.main()

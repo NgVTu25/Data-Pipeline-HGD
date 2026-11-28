@@ -11,6 +11,9 @@ from __future__ import annotations
 
 import argparse
 import logging
+import os
+import socket
+import threading
 import time
 from datetime import datetime, timedelta
 from typing import Optional
@@ -25,6 +28,59 @@ except ImportError:
     HAS_AIRFLOW = False
 
 
+class _SyncLogHeartbeat:
+    """Thread nền cập nhật HEARTBEAT_AT mỗi 30s cho batch đang RUNNING trên C360_SYNC_LOG."""
+
+    def __init__(self, run_mode: str = "NEAR_RT", oracle_sid: Optional[int] = None, interval_sec: float = 30.0):
+        self.run_mode = run_mode
+        self.oracle_sid = oracle_sid
+        self.interval_sec = interval_sec
+        self.worker_id = f"{socket.gethostname()}:{os.getpid()}"
+        self._stop_event = threading.Event()
+        self._thread: Optional[threading.Thread] = None
+
+    def _beat_once(self) -> None:
+        import oracledb
+        from src.config import TARGET_DB
+
+        with oracledb.connect(user=TARGET_DB.user, password=TARGET_DB.password, dsn=TARGET_DB.dsn) as hb_conn:
+            with hb_conn.cursor() as cur:
+                cur.execute(
+                    """
+                    UPDATE C360.C360_SYNC_LOG
+                    SET HEARTBEAT_AT = SYSTIMESTAMP,
+                        WORKER_ID = NVL(WORKER_ID, :worker_id),
+                        ORACLE_SID = NVL(ORACLE_SID, :oracle_sid)
+                    WHERE STATUS = 'RUNNING'
+                      AND END_TIME IS NULL
+                      AND RUN_MODE = :run_mode
+                    """,
+                    {
+                        "worker_id": self.worker_id[:100],
+                        "oracle_sid": self.oracle_sid,
+                        "run_mode": self.run_mode,
+                    },
+                )
+            hb_conn.commit()
+
+    def _loop(self) -> None:
+        while not self._stop_event.wait(self.interval_sec):
+            try:
+                self._beat_once()
+            except Exception as exc:
+                logging.getLogger("c360_heartbeat").debug("Heartbeat update skipped: %s", exc)
+
+    def __enter__(self) -> "_SyncLogHeartbeat":
+        self._thread = threading.Thread(target=self._loop, daemon=True)
+        self._thread.start()
+        return self
+
+    def __exit__(self, *_args: object) -> None:
+        self._stop_event.set()
+        if self._thread is not None:
+            self._thread.join(timeout=2.0)
+
+
 def _exec_near_realtime_batch() -> None:
     """Thực thi thực tế procedure C360.PKG_C360_SYNC.PRC_RUN_NEAR_REALTIME_BATCH trên Oracle."""
     import oracledb
@@ -32,7 +88,11 @@ def _exec_near_realtime_batch() -> None:
 
     with oracledb.connect(user=TARGET_DB.user, password=TARGET_DB.password, dsn=TARGET_DB.dsn) as conn:
         with conn.cursor() as cur:
-            cur.execute("BEGIN C360.PKG_C360_SYNC.PRC_RUN_NEAR_REALTIME_BATCH(p_safety_lag_seconds => 2); END;")
+            cur.execute("SELECT TO_NUMBER(SYS_CONTEXT('USERENV', 'SID')) FROM DUAL")
+            sid_row = cur.fetchone()
+            oracle_sid = int(sid_row[0]) if sid_row and sid_row[0] is not None else None
+            with _SyncLogHeartbeat(run_mode="NEAR_RT", oracle_sid=oracle_sid):
+                cur.execute("BEGIN C360.PKG_C360_SYNC.PRC_RUN_NEAR_REALTIME_BATCH(p_safety_lag_seconds => 2); END;")
 
 
 def _exec_refresh_dbhc_maps() -> None:
@@ -150,7 +210,11 @@ def run_local_pipeline_cycle(
 
             cur.execute("SELECT COUNT(*) FROM C360.C360_SYNC_QUEUE")
             pending = int(cur.fetchone()[0])
-            cur.execute("BEGIN C360.PKG_C360_SYNC.PRC_RUN_NEAR_REALTIME_BATCH(p_safety_lag_seconds => 0); END;")
+            cur.execute("SELECT TO_NUMBER(SYS_CONTEXT('USERENV', 'SID')) FROM DUAL")
+            sid_row = cur.fetchone()
+            oracle_sid = int(sid_row[0]) if sid_row and sid_row[0] is not None else None
+            with _SyncLogHeartbeat(run_mode="NEAR_RT", oracle_sid=oracle_sid):
+                cur.execute("BEGIN C360.PKG_C360_SYNC.PRC_RUN_NEAR_REALTIME_BATCH(p_safety_lag_seconds => 0); END;")
             cur.execute("SELECT COUNT(*) FROM C360.C360_SYNC_QUEUE")
             remaining = int(cur.fetchone()[0])
             logger.info("[Task 2] PRC_RUN_NEAR_REALTIME_BATCH completed (queue: %d -> %d).", pending, remaining)

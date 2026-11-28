@@ -276,21 +276,72 @@ def reclaim_stale_processing_queue(conn: Any, stale_minutes: int = 5) -> int:
     return affected
 
 
+def reclaim_stale_sync_logs(conn: Any, stale_minutes: int = 2) -> int:
+    """
+    Đánh dấu FAILED cho các bản ghi C360_SYNC_LOG bị treo (worker đã chết / mất heartbeat):
+    - Quá `stale_minutes` không thấy HEARTBEAT_AT cập nhật (hoặc START_TIME nếu chưa có heartbeat), HOẶC
+    - Với RUN_MODE = 'NEAR_RT': không còn dòng C360_SYNC_QUEUE nào giữ CLAIMED_BATCH_ID = l.BATCH_ID
+      sau ít nhất `stale_minutes` (batch mồ côi do queue đã bị reclaim).
+    """
+    if stale_minutes <= 0:
+        raise ValueError("stale_minutes phải > 0")
+
+    sql = """
+        UPDATE C360.C360_SYNC_LOG l
+        SET l.STATUS = 'FAILED',
+            l.END_TIME = SYSTIMESTAMP,
+            l.ERROR_MESSAGE = NVL(
+                l.ERROR_MESSAGE,
+                'Marked FAILED by auto-heal: worker heartbeat expired or orphaned batch (> ' || :stale_minutes || 'm)'
+            )
+        WHERE l.STATUS = 'RUNNING'
+          AND l.END_TIME IS NULL
+          AND (
+              NVL(l.HEARTBEAT_AT, l.START_TIME) < SYSTIMESTAMP - NUMTODSINTERVAL(:stale_minutes, 'MINUTE')
+              OR (
+                  l.RUN_MODE = 'NEAR_RT'
+                  AND l.START_TIME < SYSTIMESTAMP - NUMTODSINTERVAL(:stale_minutes, 'MINUTE')
+                  AND NOT EXISTS (
+                      SELECT 1 FROM C360.C360_SYNC_QUEUE q
+                      WHERE q.CLAIMED_BATCH_ID = l.BATCH_ID
+                  )
+              )
+          )
+    """
+    with conn.cursor() as cur:
+        cur.execute(sql, {"stale_minutes": stale_minutes})
+        affected = int(cur.rowcount or 0)
+    conn.commit()
+    if affected > 0:
+        log_recovery_event(
+            conn,
+            "ORACLE_SYNC_LOG",
+            "MARK_STALE_SYNC_LOG_FAILED",
+            "C360.C360_SYNC_LOG",
+            "SUCCESS",
+            f"Marked {affected} dead/orphaned RUNNING batch(es) (> {stale_minutes}m) as FAILED.",
+        )
+    return affected
+
+
 def run_auto_heal(
     connect_url: str = DEFAULT_CONNECT_URL,
     bootstrap_servers: str = DEFAULT_BOOTSTRAP_SERVERS,
     include_paused: bool = False,
     stale_minutes: int = 5,
+    sync_log_stale_minutes: int = 2,
     use_oracle: bool = True,
 ) -> Dict[str, Any]:
-    """Chạy chu trình Auto-Heal đầy đủ cho Kafka, Debezium Connectors và Oracle Queue."""
+    """Chạy chu trình Auto-Heal đầy đủ cho Kafka, Debezium Connectors, Oracle Queue và Sync Log."""
     kafka_up = check_kafka_broker(bootstrap_servers)
     conn = None
     reclaimed = 0
+    marked_failed_logs = 0
     if use_oracle:
         try:
             conn = oracledb.connect(user=TARGET_DB.user, password=TARGET_DB.password, dsn=TARGET_DB.dsn)
             reclaimed = reclaim_stale_processing_queue(conn, stale_minutes=stale_minutes)
+            marked_failed_logs = reclaim_stale_sync_logs(conn, stale_minutes=sync_log_stale_minutes)
         except Exception as exc:
             logger.warning("Oracle connection unavailable during auto-heal: %s", exc)
 
@@ -304,6 +355,7 @@ def run_auto_heal(
             "kafka_broker_up": kafka_up,
             "connectors": connector_results,
             "reclaimed_queue_rows": reclaimed,
+            "marked_failed_sync_logs": marked_failed_logs,
         }
     finally:
         if conn is not None:
@@ -756,6 +808,7 @@ def main(argv: Optional[List[str]] = None) -> int:
     p_heal = sub.add_parser("auto-heal", help="Kiểm tra Kafka/Debezium và tự động restart task FAILED.")
     p_heal.add_argument("--include-paused", action="store_true")
     p_heal.add_argument("--stale-minutes", type=int, default=5)
+    p_heal.add_argument("--sync-log-stale-minutes", type=int, default=2)
 
     p_ing = sub.add_parser("ingest-dlq", help="Đọc Kafka DLQ topic lưu vào C360_DLQ_ARCHIVE.")
     p_ing.add_argument("--max-messages", type=int, default=500)
@@ -781,7 +834,11 @@ def main(argv: Optional[List[str]] = None) -> int:
     args = parser.parse_args(argv)
 
     if args.command == "auto-heal":
-        res = run_auto_heal(include_paused=args.include_paused, stale_minutes=args.stale_minutes)
+        res = run_auto_heal(
+            include_paused=args.include_paused,
+            stale_minutes=args.stale_minutes,
+            sync_log_stale_minutes=args.sync_log_stale_minutes,
+        )
         print(json.dumps(res, indent=2, ensure_ascii=False))
         return 0
 
