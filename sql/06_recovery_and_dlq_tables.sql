@@ -55,3 +55,20 @@ BEGIN
     ');
 END;
 /
+
+DECLARE
+    PROCEDURE add_col_ignore_exists(p_sql IN VARCHAR2) IS
+    BEGIN
+        EXECUTE IMMEDIATE p_sql;
+    EXCEPTION
+        WHEN OTHERS THEN
+            IF SQLCODE != -1430 THEN
+                RAISE;
+            END IF;
+    END;
+BEGIN
+    add_col_ignore_exists('ALTER TABLE C360.C360_SYNC_LOG ADD (WORKER_ID VARCHAR2(100 BYTE))');
+    add_col_ignore_exists('ALTER TABLE C360.C360_SYNC_LOG ADD (ORACLE_SID NUMBER)');
+    add_col_ignore_exists('ALTER TABLE C360.C360_SYNC_LOG ADD (HEARTBEAT_AT TIMESTAMP)');
+END;
+/
