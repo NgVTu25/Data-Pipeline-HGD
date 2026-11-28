@@ -55,6 +55,14 @@ def _exec_reconciliation() -> None:
         raise RuntimeError(f"3-tier reconciliation FAILED: {report}")
 
 
+def _exec_auto_heal() -> None:
+    """Kiểm tra và tự động khôi phục Debezium connector / stale queue trước khi đồng bộ."""
+    from src.recovery.pipeline_recovery import run_auto_heal
+
+    result = run_auto_heal()
+    logging.getLogger("airflow.task").info("Auto-heal result: %s", result)
+
+
 if HAS_AIRFLOW:
     default_args = {
         "owner": "data_engineering_team",
@@ -75,10 +83,17 @@ if HAS_AIRFLOW:
         tags=["bhxh", "c360", "near_realtime"],
     ) as dag_near_realtime:
 
+        auto_heal_connectors = PythonOperator(
+            task_id="auto_heal_connectors",
+            python_callable=_exec_auto_heal,
+        )
+
         run_near_realtime_batch = PythonOperator(
             task_id="run_near_realtime_batch",
             python_callable=_exec_near_realtime_batch,
         )
+
+        auto_heal_connectors >> run_near_realtime_batch
 
     with DAG(
         dag_id="c360_daily_map_and_reconcile",
@@ -104,7 +119,11 @@ if HAS_AIRFLOW:
         refresh_dbhc_maps >> run_reconciliation
 
 
-def run_local_pipeline_cycle(refresh_maps: bool = True, reconcile: bool = True) -> None:
+def run_local_pipeline_cycle(
+    refresh_maps: bool = True,
+    reconcile: bool = True,
+    auto_heal: bool = False,
+) -> None:
     """Chạy mô phỏng 1 chu kỳ điều phối trực tiếp trên Oracle khi không có Airflow."""
     import oracledb
     from src.config import TARGET_DB
@@ -116,6 +135,12 @@ def run_local_pipeline_cycle(refresh_maps: bool = True, reconcile: bool = True) 
         datefmt="%Y-%m-%d %H:%M:%S",
     )
     logger = logging.getLogger("c360_local_scheduler")
+
+    if auto_heal:
+        from src.recovery.pipeline_recovery import run_auto_heal
+
+        heal_res = run_auto_heal()
+        logger.info("[Task 0] Auto-heal completed: %s", heal_res)
 
     with oracledb.connect(user=TARGET_DB.user, password=TARGET_DB.password, dsn=TARGET_DB.dsn) as conn:
         with conn.cursor() as cur:
@@ -140,10 +165,11 @@ def main(argv: Optional[list[str]] = None) -> None:
     parser.add_argument("--loop", action="store_true", help="Chạy vòng lặp Near Real-time liên tục.")
     parser.add_argument("--interval", type=float, default=10.0, help="Số giây nghỉ giữa mỗi vòng --loop (mặc định 10s).")
     parser.add_argument("--skip-reconcile", action="store_true", help="Bỏ qua bước đối soát 3 tầng.")
+    parser.add_argument("--auto-heal", action="store_true", help="Bật tự động kiểm tra & khôi phục connector/stale queue.")
     args, _unknown = parser.parse_known_args(argv)
 
     if not args.loop:
-        run_local_pipeline_cycle(refresh_maps=True, reconcile=not args.skip_reconcile)
+        run_local_pipeline_cycle(refresh_maps=True, reconcile=not args.skip_reconcile, auto_heal=args.auto_heal)
         return
 
     logging.basicConfig(level=logging.INFO, format="%(asctime)s [%(levelname)s] %(message)s")
@@ -151,7 +177,7 @@ def main(argv: Optional[list[str]] = None) -> None:
     try:
         first = True
         while True:
-            run_local_pipeline_cycle(refresh_maps=first, reconcile=False)
+            run_local_pipeline_cycle(refresh_maps=first, reconcile=False, auto_heal=args.auto_heal)
             first = False
             time.sleep(max(1.0, args.interval))
     except KeyboardInterrupt:
