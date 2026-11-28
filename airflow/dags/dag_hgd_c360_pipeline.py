@@ -241,8 +241,11 @@ def main(argv: Optional[list[str]] = None) -> None:
     try:
         first = True
         while True:
-            run_local_pipeline_cycle(refresh_maps=first, reconcile=False, auto_heal=args.auto_heal)
-            first = False
+            try:
+                run_local_pipeline_cycle(refresh_maps=first, reconcile=False, auto_heal=args.auto_heal)
+                first = False
+            except Exception as exc:
+                logging.exception("Cycle failed (will retry after %.1fs): %s", args.interval, exc)
             time.sleep(max(1.0, args.interval))
     except KeyboardInterrupt:
         logging.info("Stopped local scheduler.")

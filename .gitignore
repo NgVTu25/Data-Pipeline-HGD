@@ -48,6 +48,7 @@ airflow/webserver_config.py
 # IDE & OS files
 .vscode/
 .idea/
+.archify/
 .DS_Store
 Thumbs.db
 

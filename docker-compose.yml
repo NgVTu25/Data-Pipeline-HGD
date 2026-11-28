@@ -81,5 +81,28 @@ services:
       - ./drivers/ojdbc11.jar:/kafka/connect/debezium-connector-jdbc/ojdbc11.jar:ro
       - ./secrets.properties:/kafka/connect/secrets.properties:ro
 
+  airflow-standalone:
+    image: apache/airflow:2.10.4-python3.11
+    container_name: hgd-airflow
+    profiles: ["airflow"]
+    restart: unless-stopped
+    command: standalone
+    ports:
+      - "8080:8080"
+    environment:
+      AIRFLOW__CORE__LOAD_EXAMPLES: "false"
+      AIRFLOW__CORE__DAGS_ARE_PAUSED_AT_CREATION: "false"
+      PYTHONPATH: /opt/airflow
+      _PIP_ADDITIONAL_REQUIREMENTS: "oracledb python-dotenv requests"
+      SOURCE_DB_HOST: oracle-db
+      TARGET_DB_HOST: oracle-db
+      KAFKA_CONNECT_URL: http://debezium-connect:8083
+    volumes:
+      - ./airflow/dags:/opt/airflow/dags:ro
+      - ./src:/opt/airflow/src:ro
+      - ./.env:/opt/airflow/.env:ro
+      - airflow_data:/opt/airflow/logs
+
 volumes:
   oracle_data:
+  airflow_data:

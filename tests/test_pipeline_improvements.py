@@ -488,6 +488,250 @@ class TestPipelineImprovements(unittest.TestCase):
         self.assertEqual(evaluate_source_mirror_checksum(src, mir_bad, in_flight_q=0)["status"], "FAIL")
         self.assertEqual(evaluate_source_mirror_checksum(src, mir_bad, in_flight_q=2)["status"], "IN_PROGRESS")
 
+    def test_simulate_cdc_build_target_spec_cloud_wallet_and_local(self):
+        from src.config import AutonomousDatabaseConfig, DatabaseConfig
+        from src.data_generator import simulate_cdc_changes as sim_mod
+
+        local_cfg = DatabaseConfig(
+            host="localhost",
+            port=1521,
+            service="FREEPDB1",
+            user="vss_source",
+            password="pwd",
+            schema="VSS",
+        )
+        with patch.object(sim_mod, "SOURCE_DB", local_cfg):
+            local_spec = sim_mod.build_target_spec("local")
+            self.assertEqual(local_spec.target, "local")
+            self.assertEqual(local_spec.full_table, "VSS.VSS_HO_GD_NHANKHAU")
+            self.assertIsNone(local_spec.wallet_dir)
+
+        with tempfile.TemporaryDirectory() as tmp_dir:
+            wallet_dir = Path(tmp_dir) / "Wallet_BHXHTEST"
+            wallet_dir.mkdir()
+            (wallet_dir / "tnsnames.ora").write_text(
+                "bhxhcloud_medium = (DESCRIPTION=())\nbhxhcloud_high = (DESCRIPTION=())\n",
+                encoding="utf-8",
+            )
+            cloud_cfg = AutonomousDatabaseConfig(
+                tns_alias="",
+                user="BHXH_TEST",
+                password="secret",
+                wallet_location=tmp_dir,
+                schema="VSS",
+                table="VSS_HO_GD_NHANKHAU",
+            )
+            with patch.object(sim_mod, "FULLLOAD_DB", cloud_cfg):
+                cloud_spec = sim_mod.build_target_spec("cloud")
+                self.assertEqual(cloud_spec.target, "cloud")
+                self.assertEqual(cloud_spec.dsn, "bhxhcloud_high")
+                self.assertEqual(cloud_spec.wallet_dir, str(wallet_dir))
+                self.assertEqual(cloud_spec.full_table, "VSS.VSS_HO_GD_NHANKHAU")
+
+    def test_simulate_cdc_loads_vss_context_detects_defects_and_builds_diverse_variants(self):
+        from src.data_generator import simulate_cdc_changes as sim_mod
+
+        class _FakeCursor:
+            def __init__(self):
+                self._rows = []
+
+            def execute(self, sql, _params=None):
+                if "VSS_DM_DBHC" in sql:
+                    self._rows = [("79TTT", "26734", "TP.HCM", "Phường Sài Gòn")]
+                elif "VSS_DM_DANTOC" in sql:
+                    self._rows = [(1, "01", "Kinh"), (2, "02", "Tày")]
+                elif "VSS_DM_QUOC_TICH" in sql:
+                    self._rows = [(233, "VN", "Việt Nam"), (101, "KR", "Hàn Quốc")]
+                elif "SELECT DISTINCT TRIM(HO_TEN)" in sql:
+                    self._rows = [
+                        ("Lê Minh Quân",),
+                        ("Phạm Ngọc Anh",),
+                        ("Võ Thanh Thảo",),
+                    ]
+                else:
+                    self._rows = []
+
+            def fetchall(self):
+                return list(self._rows)
+
+        ref_ctx = sim_mod.load_vss_reference_context(_FakeCursor(), "VSS", "VSS_HO_GD_NHANKHAU")
+        self.assertEqual(ref_ctx.locations[0].ma_tinh, "79TTT")
+        self.assertEqual(ref_ctx.locations[0].ma_xa, "26734")
+        self.assertIn("Lê", ref_ctx.last_names)
+        self.assertIn("Quân", ref_ctx.first_names)
+
+        # Kiểm tra các biến thể INSERT 1A khác biệt nhau nhưng bám danh mục VSS
+        p_clean = sim_mod.build_insert_variant_payload(1, "1A_CLEAN", ref_ctx)
+        p_no_cccd = sim_mod.build_insert_variant_payload(2, "1A_MISSING_CCCD", ref_ctx)
+        p_bad_birth = sim_mod.build_insert_variant_payload(3, "1A_BAD_BIRTH_AND_PHONE", ref_ctx)
+        p_pending = sim_mod.build_insert_variant_payload(4, "1A_PENDING_APPROVAL", ref_ctx)
+        p_diverse = sim_mod.build_insert_variant_payload(6, "1A_DIVERSE_CATALOG_OR_DECEASED", ref_ctx)
+
+        self.assertEqual((p_clean["ma_tinh"], p_clean["ma_xa"]), ("79TTT", "26734"))
+        self.assertIsNone(p_no_cccd["so_cccd"])
+        self.assertEqual(p_bad_birth["phone_number"], "12345")
+        self.assertEqual(p_pending["trang_thai_duyet"], 1)
+        self.assertEqual(p_diverse["dm_dan_toc_id"], 2)
+        self.assertEqual(p_diverse["is_alive"], "0")
+
+        # Kiểm tra detect_citizen_dq_defects và build_fix_update_plan sửa đúng lỗi thực tế
+        dirty_rec = sim_mod.CitizenRecord(
+            ma_cd="CLOUD_0001",
+            ho_ten="  Lê Minh Quân  ",
+            gioi_tinh="1",
+            ngay_sinh=19950230,
+            so_cccd=None,
+            so_cmtnd=None,
+            phone_number="123",
+            ma_tinh="99TTT",
+            ma_xa="99999",
+            quoc_tich="XX",
+            dm_dan_toc_id=9999,
+            households=[sim_mod.CitizenHousehold(id="CLOUD_0001_H1", ma_ho_gd="HGD_1")],
+            from_vss=True,
+        )
+        defects = sim_mod.detect_citizen_dq_defects(dirty_rec, ref_ctx)
+        self.assertEqual(
+            set(defects),
+            {
+                "KHONG_SO_DINH_DANH",
+                "NGAY_SINH_LOI",
+                "SDT_LOI",
+                "TINH_XA_KHONG_MAP",
+                "QUOC_TICH_LOI",
+                "DAN_TOC_LOI",
+                "HO_TEN_KHOANG_TRANG",
+            },
+        )
+        set_sql, params, _ = sim_mod.build_fix_update_plan(dirty_rec, ref_ctx, "2_FIX_ACTUAL_DEFECTS_FULL")
+        self.assertIn("SO_CCCD = :so_cccd", set_sql)
+        self.assertIn("MA_TINH = :ma_tinh", set_sql)
+        self.assertEqual(params["ma_tinh"], "79TTT")
+        self.assertEqual(params["ma_xa"], "26734")
+        self.assertEqual(sim_mod.detect_citizen_dq_defects(dirty_rec, ref_ctx), [])
+
+    def test_simulate_cdc_cloud_scenarios_and_random_stream_with_mock_oracle(self):
+        from src.config import AutonomousDatabaseConfig
+        from src.data_generator import simulate_cdc_changes as sim_mod
+
+        class _MockCursor:
+            def __init__(self):
+                self.executed = []
+                self._rows = []
+                self.rowcount = 1
+
+            def __enter__(self):
+                return self
+
+            def __exit__(self, *_args):
+                return False
+
+            def execute(self, sql, params=None):
+                self.executed.append((sql.strip(), params))
+                self.rowcount = 1
+                if "VSS_DM_DBHC" in sql:
+                    self._rows = [("01TTT", "00004", "Hà Nội", "Ba Đình"), ("79TTT", "26734", "TP.HCM", "Sài Gòn")]
+                elif "VSS_DM_DANTOC" in sql:
+                    self._rows = [(1, "01", "Kinh"), (2, "02", "Tày")]
+                elif "VSS_DM_QUOC_TICH" in sql:
+                    self._rows = [(233, "VN", "Việt Nam"), (101, "KR", "Hàn Quốc")]
+                elif "SELECT DISTINCT TRIM(HO_TEN)" in sql:
+                    self._rows = [("Nguyễn Văn An",), ("Trần Thị Bình",), ("Lê Hoàng Cường",)]
+                elif "SELECT DISTINCT MA_CD FROM" in sql or "HAVING COUNT(*) >= 2" in sql:
+                    if "TRANG_THAI_DUYET = 1" in sql:
+                        self._rows = [("VSS_PEND_01",)]
+                    elif "HAVING COUNT(*) >= 2" in sql:
+                        self._rows = [("VSS_MULTI_01",)]
+                    elif "SO_CCCD IS NULL" in sql:
+                        self._rows = [("VSS_DIRTY_01",)]
+                    else:
+                        self._rows = [("VSS_CLEAN_01",), ("VSS_CLEAN_02",), ("VSS_CLEAN_03",)]
+                elif "WHERE MA_CD IN (" in sql:
+                    self._rows = [
+                        ("VSS_CLEAN_01_H1", "VSS_CLEAN_01", "HGD_C1", "Nguyễn Văn An", "1", 19900101, "001090000001", None, "0901111111", "01TTT", "00004", "VN", 1, "1", None, 2, None, None),
+                        ("VSS_CLEAN_02_H1", "VSS_CLEAN_02", "HGD_C2", "Trần Thị Bình", "0", 19910202, "001091000002", None, "0902222222", "01TTT", "00004", "VN", 1, "1", None, 2, None, None),
+                        ("VSS_CLEAN_03_H1", "VSS_CLEAN_03", "HGD_C3", "Lê Hoàng Cường", "1", 19920303, "001092000003", None, "0903333333", "01TTT", "00004", "VN", 1, "1", None, 2, None, None),
+                        ("VSS_DIRTY_01_H1", "VSS_DIRTY_01", "HGD_D1", "  Phạm Văn Bẩn  ", "1", 19950230, None, None, "123", "99TTT", "99999", "XX", 9999, "1", None, 2, None, None),
+                        ("VSS_PEND_01_H1", "VSS_PEND_01", "HGD_P1", "Đỗ Chờ Duyệt", "0", 19930404, "001093000004", None, "0904444444", "01TTT", "00004", "VN", 1, "1", None, 1, None, None),
+                        ("VSS_MULTI_01_H1", "VSS_MULTI_01", "HGD_M1", "Hoàng Nhiều Hộ", "1", 19880505, "001088000005", None, "0905555555", "01TTT", "00004", "VN", 1, "1", None, 2, None, None),
+                        ("VSS_MULTI_01_H2", "VSS_MULTI_01", "HGD_M2", "Hoàng Nhiều Hộ", "1", 19880505, "001088000005", None, "0905555555", "79TTT", "26734", "VN", 1, "1", None, 2, None, None),
+                    ]
+                else:
+                    self._rows = []
+
+            def fetchall(self):
+                return list(self._rows)
+
+            def fetchone(self):
+                return self._rows[0] if self._rows else (0,)
+
+        class _MockConn:
+            def __init__(self):
+                self.cur = _MockCursor()
+                self.commits = 0
+                self.rollbacks = 0
+
+            def __enter__(self):
+                return self
+
+            def __exit__(self, *_args):
+                return False
+
+            def cursor(self):
+                return self.cur
+
+            def commit(self):
+                self.commits += 1
+
+            def rollback(self):
+                self.rollbacks += 1
+
+        with tempfile.TemporaryDirectory() as tmp_dir:
+            (Path(tmp_dir) / "tnsnames.ora").write_text("bhxhcloud_high = (DESCRIPTION=())\n", encoding="utf-8")
+            cloud_cfg = AutonomousDatabaseConfig(
+                tns_alias="bhxhcloud_high",
+                user="BHXH_TEST",
+                password="secret",
+                wallet_location=tmp_dir,
+                schema="VSS",
+                table="VSS_HO_GD_NHANKHAU",
+            )
+            mock_conn_scenarios = _MockConn()
+            mock_conn_random = _MockConn()
+            connect_calls = []
+
+            def fake_connect(**kwargs):
+                connect_calls.append(kwargs)
+                return mock_conn_scenarios if len(connect_calls) == 1 else mock_conn_random
+
+            with (
+                patch.object(sim_mod, "FULLLOAD_DB", cloud_cfg),
+                patch.object(sim_mod.oracledb, "connect", side_effect=fake_connect),
+            ):
+                results = sim_mod.run_cdc_simulation(
+                    selected_keys=["1A", "1B", "2", "3A", "3B", "4", "5A", "5B"],
+                    target="cloud",
+                    sample_size=50,
+                )
+                self.assertEqual(len(results), 8)
+                self.assertTrue(all(cnt == 1 for _, cnt in results))
+                self.assertEqual(connect_calls[0]["config_dir"], tmp_dir)
+                self.assertEqual(connect_calls[0]["wallet_location"], tmp_dir)
+                self.assertEqual(connect_calls[0]["dsn"], "bhxhcloud_high")
+
+                # Kiểm tra kịch bản 2 thực sự sửa bản ghi bẩn đọc từ VSS (VSS_DIRTY_01)
+                update_params = [p for sql, p in mock_conn_scenarios.cur.executed if sql.startswith("UPDATE VSS.VSS_HO_GD_NHANKHAU") and p]
+                self.assertTrue(any(p.get("ma_cd") == "VSS_DIRTY_01" for p in update_params))
+
+                events = sim_mod.run_random_cdc_stream(
+                    interval_seconds=0.0,
+                    max_events=8,
+                    target="cloud",
+                    sample_size=50,
+                )
+                self.assertEqual(events, 8)
+                self.assertEqual(mock_conn_random.commits, 8)
+
 
 if __name__ == "__main__":
     unittest.main()
